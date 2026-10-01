@@ -1,3 +1,4 @@
 # Ignore environment secrets
 .env
 raw_*
+dedupe_*
