@@ -194,6 +194,7 @@ Below is an example Python script that extracts data from the contacts endpoint.
 <details>
 <summary>freeagent_extract</summary>
 
+```
 # Extract ALL Contacts (Customer/Supplier Dimension) with Pagination from FreeAgent API v2
 # Docs: https://dev.freeagent.com/docs/contacts
 
