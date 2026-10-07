@@ -4,9 +4,9 @@
 ## Introduction
 
 ## Learning Objectives
--- Considerations for Extracting Data
--- Introduction to Airbyte Cloud
--- Extracting with Python
+- Considerations for Extracting Data
+- Introduction to Airbyte Cloud
+- Extracting with Python
 
 ## Considerations for Extracting Data
 
@@ -54,13 +54,6 @@ A connection is a pipeline from a data source system, e.g. Amplitude, Mailchimp,
 ### Create New Source
 - Search for and select FreeAgent. However this is the production API and we have set up a Sandbox. Click the 'Fork in Builder' button on the bottom left. Use a text editor to change all instances of production URLs in the YAML to the sandbox variation.
 - Configure inputs from LastPass
-
-Create a source
-- Retrieve API and Secret keys from LastPass
-- Set Replication Start Date to last week in date format
-- Optional field, change Data region to "EU Residency Server"
-- Leave all other fields as default values
-- Click Set up source
 
 ### Create a New Destination
 
