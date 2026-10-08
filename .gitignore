@@ -2,3 +2,4 @@
 .env
 raw_*
 dedupe_*
+.venv
