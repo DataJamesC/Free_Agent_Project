@@ -1,9 +1,9 @@
-# add_invoices.py - Creates Contacts and Invoices in FreeAgent Sandbox
+# add_invoices.py - Seeds Invoices using Existing Contacts in FreeAgent Sandbox
 
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 from dotenv import load_dotenv
 
@@ -38,67 +38,75 @@ session.headers.update(
     }
 )
 
-company_types = ["Corp", "Inc", "Ltd", "Holdings", "Tech", "Solutions"]
+# Step 2: Fetch Existing Contacts from FreeAgent
+print("\n--- Phase 1: Fetching Existing Contacts ---")
+contact_urls = []
+page = 1
+per_page = 100
+
+while True:
+    params = {"view": "all", "page": page, "per_page": per_page}
+    res = session.get("https://api.sandbox.freeagent.com/v2/contacts", params=params)
+
+    if res.status_code != 200:
+        print(f"Error fetching contacts (Page {page}): {res.status_code} - {res.text}")
+        break
+
+    contacts_batch = res.json().get("contacts", [])
+    if not contacts_batch:
+        break
+
+    for contact in contacts_batch:
+        if "url" in contact:
+            contact_urls.append(contact["url"])
+
+    if len(contacts_batch) < per_page:
+        break
+
+    page += 1
+
+print(f"Successfully loaded {len(contact_urls)} existing contacts from Sandbox.")
+
+if not contact_urls:
+    print("No contacts found in Sandbox! Please run 'add_contacts.py' first.")
+    exit(1)
+
+# Step 3: Seed Invoices Linked to Existing Contacts
+NUM_INVOICES_TO_CREATE = 30 
+print(f"\n--- Phase 2: Creating {NUM_INVOICES_TO_CREATE} Invoices ---")
+
 item_types = ["Hours", "Days", "Products", "Services"]
 descriptions = [
     "Data Engineering Consulting",
     "Pipeline Optimization",
     "Cloud Architecture Migration",
     "API Integration Development",
+    "Snowflake Star Schema Modeling",
+    "Data Pipeline Auditing",
 ]
 
-# Step 2: Create Contacts
-contact_urls = []
-print("\n--- Phase 1: Creating Contacts ---")
+today = datetime.now()
 
-for i in range(1, 101):
-    company_name = f"Client {i} {random.choice(company_types)}"
-    contact_payload = {
-        "contact": {
-            "first_name": "Contact",
-            "last_name": str(i),
-            "organisation_name": company_name,
-            "email": f"billing@client{i}.example.com",
-        }
-    }
-
-    res = session.post(
-        "https://api.sandbox.freeagent.com/v2/contacts", json=contact_payload
-    )
-
-    if res.status_code in (200, 201):
-        url = res.json()["contact"]["url"]
-        contact_urls.append(url)
-        print(f"[{i}/100] Created Contact: {company_name}")
-    else:
-        print(f"[{i}/100] Failed Contact: {res.status_code}")
-
-    time.sleep(0.5)
-
-if not contact_urls:
-    print("No contacts were created. Aborting invoice creation.")
-    exit(1)
-
-# Step 3: Create Invoices
-print("\n--- Phase 2: Creating Invoices ---")
-today_str = datetime.now().strftime("%Y-%m-%d")
-
-for i in range(1, 1001):
+for i in range(1, NUM_INVOICES_TO_CREATE + 1):
     target_contact = random.choice(contact_urls)
+
+    # Vary invoice dates across the last 90 days for realistic aging analysis
+    random_days_ago = random.randint(0, 90)
+    invoice_date = (today - timedelta(days=random_days_ago)).strftime("%Y-%m-%d")
 
     invoice_payload = {
         "invoice": {
             "contact": target_contact,
-            "dated_on": today_str,
+            "dated_on": invoice_date,
             "payment_terms_in_days": random.choice([7, 14, 30, 60]),
             "currency": "GBP",
             "invoice_items": [
                 {
                     "description": random.choice(descriptions),
-                    "price": f"{random.randint(250, 5000):.2f}",
-                    "quantity": f"{random.randint(1, 20):.1f}",
+                    "price": f"{random.randint(300, 4500):.2f}",
+                    "quantity": f"{random.randint(1, 15):.1f}",
                     "item_type": random.choice(item_types),
-                    "sales_tax_rate": "0.0",
+                    "sales_tax_rate": "20.0",  # Standard 20% VAT
                 }
             ],
         }
@@ -109,10 +117,12 @@ for i in range(1, 1001):
     )
 
     if res.status_code in (200, 201):
-        print(f"[{i}/1000] Created Invoice")
+        invoice_url = res.json().get("invoice", {}).get("url")
+        print(f"[{i}/{NUM_INVOICES_TO_CREATE}] Created Invoice: {invoice_url}")
     else:
-        print(f"[{i}/1000] Failed Invoice: {res.status_code} - {res.text}")
+        print(f"[{i}/{NUM_INVOICES_TO_CREATE}] Failed Invoice: {res.status_code} - {res.text}")
 
-    time.sleep(0.5)
+    # Small delay to keep within API rate limits
+    time.sleep(0.2)
 
-print("\n--- Seeding Complete! ---")
+print("\n--- Invoice Seeding Complete! ---")

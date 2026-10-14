@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Generation count: Start with 10 to test, then change to 100+ for bulk
-COUNT = 1000
+COUNT = 250
 
 CLIENT_ID = os.getenv("FREEAGENT_CLIENT_ID")
 CLIENT_SECRET = os.getenv("FREEAGENT_CLIENT_SECRET")

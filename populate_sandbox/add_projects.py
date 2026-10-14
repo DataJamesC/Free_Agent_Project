@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Set generation count
-COUNT = 500
+COUNT = 200
 
 CLIENT_ID = os.getenv("FREEAGENT_CLIENT_ID")
 CLIENT_SECRET = os.getenv("FREEAGENT_CLIENT_SECRET")

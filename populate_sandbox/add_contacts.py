@@ -52,7 +52,7 @@ headers = {
     "User-Agent": "FreeAgentSeeder/1.0",
 }
 
-NUM_CONTACTS_TO_CREATE = 10
+NUM_CONTACTS_TO_CREATE = 25
 print(f"Starting creation of {NUM_CONTACTS_TO_CREATE} sample contacts in FreeAgent Sandbox...\n")
 
 for i in range(NUM_CONTACTS_TO_CREATE):

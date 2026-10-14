@@ -119,7 +119,7 @@ The next page should read 'This site can't be reached'. Have no fear, this has s
 
 ### Using this code to get your FreeAgent Refresh Token
 
-Create a .py file in your repo called get_token.py. 
+Create a .py file in your repo called get_token.py. Use the below script to generate your Refresh Token, and store it in your .env 
 
 <details>
 <summary>get_token script</summary>
@@ -165,6 +165,10 @@ else:
 ```
 </details>
 
+## Populating the Sand Box
+
+We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account.
+
 ## Extracting with Python
 
 ### Freeagent's API
@@ -195,7 +199,7 @@ For example:
 Consider the concepts discussed in Extract Fundamentals and think about how you would incorporate them.
 
 ### The Calls
-Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint 
+Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint. You can see an example of this in the population scripts we just used. 
 
 ### Example url, headers
 url = "https://api.sandbox.freeagent.com/v2/invoices"
