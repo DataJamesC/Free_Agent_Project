@@ -1,0 +1,5 @@
+# Ignore environment secrets
+.env
+raw_*
+dedupe_*
+.venv
