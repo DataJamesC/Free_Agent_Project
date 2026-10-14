@@ -121,6 +121,12 @@ The next page should read 'This site can't be reached'. Have no fear, this has s
 
 Create a .py file in your repo called get_token.py. 
 
+<details>
+<summary>get_token script</summary>
+```
+
+```
+</details>
 
 ## Extracting with Python
 
