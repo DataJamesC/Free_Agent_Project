@@ -31,60 +31,33 @@ Data extraction methods can also include: Web Scraping and Parsing, Optical Char
 - **Budget Constraints** Balancing costs with the need for effective extraction solutions.
 - **Compliance** Adhering to data governance standards and regulations.
 
-## Airbyte Cloud
+## The Free Agent Sandbox
 
 ### Introduction
 
-[Airbyte](https://airbyte.com/) Cloud is a fully managed cloud-based data integration platform that enables users to quickly and easily extract data from various sources and load it into their desired destinations. 
+We need to start by making a sandbox FreeAgent account for our new businesses. We'll then be able to populate these sandboxes with fake data, simulating a production FreeAgent and allowing us to create a pipeline for simulated business data. 
 
-It is built on the open-source Airbyte engine, designed to automate complex data pipeline tasks, simplifying data integration and freeing up engineering time for higher-value tasks.
+### Sign up for your sandbox
 
-### Sign up for Airbyte Cloud
+On the sandbox freeagent website (https://signup.sandbox.freeagent.com/signup), sign up for a free trial account, valid for 30 days.
 
-On [Airbyte's](https://airbyte.com/) website sign up for a trial Cloud account, valid for 14 days. 
+The details that you put into your business can be anything and do not factor into how we proceed.
 
-If you have already signed up for an account use your email address with a '+' after the username, e.g. will.sutton+1@email.co.uk, will.sutton+airbyte@email.co.uk
+### Register an Application on the FreeAgent Developer Dashboard
 
-### Create a New Connection
+Navigate to the FreeAgent Developer Dashboard (https://dev.freeagent.com/) and log in using the Sandbox account email and password that we just created.
 
-A connection is a pipeline from a data source system, e.g. Amplitude, Mailchimp, LinkedIn to the destination location, typically a data lake or warehouse, e.g. Snowflake, Amazon S3 Bucket, Azure Blob Storage.
+Click Create New App. Give the app a name and description of your choosing. Add http://localhost:8080/callback to the section with OAuth redirect URIs (no need to remove the other two, though they aren't needed now). Click Create App, and note the OAuth identifier and OAuth Secret. These will be added to our .env file later to act as the credentials for our API calls.
 
-### Create a New Connection
+### Obtain your Initial Authorization Code
 
-### Create New Source
-- Search for and select FreeAgent. However this is the production API and we have set up a Sandbox. Click the 'Fork in Builder' button on the bottom left. Use a text editor to change all instances of production URLs in the YAML to the sandbox variation.
-- Configure inputs from LastPass
+FreeAgent requires an OAuth 2.0 handshake before you can call the API via code. We need to find our Initial Authorization Code, which we can then use to generate a Refresh token. This Refresh token can then live in our .env file, so this is a one-time process.
 
-### Create a New Destination
+Copy the following URL, replacing <YOUR_CLIENT_ID> with your actual OAuth Identifier logged above:
+```
+https://api.sandbox.freeagent.com/v2/approve_app?client_id=<YOUR_CLIENT_ID>&response_type=code&redirect_uri=http://localhost:8080/callback
+```
 
-Create new destination
-- Set up a new destination
-- Select S3 (found under marketplace)
-
-Create a source
-- Enter S3 details as follows:
-    - Access Key ID: &lt;stored in LastPass&gt;
-    - Secret Access Key: &lt;stored in LastPass&gt;
-    - S3 Bucket Name: &lt;stored in LastPass&gt;
-    - S3 Bucket Path: airbyte-sync/&lt;DESX-your-name&gt;
-    - S3 Bucket Region: eu-west-2
-- Set the Output Format as JSON
-- Leave all other fields
-- Click Set up destination
-- Test destination
-
-Select streams
-- Select all relevant streams (Contacts, Invoices, Projects, Timeslips, Users)
-- Sync mode: Append for all, Incremental where possible, 
-i.e. "Incremental | Append", otherwise "Full refresh | Append"
-
-Configure connection
-- Schedule Type: Scheduled
-- Replication frequency: Every 24 hours
-- Destination Namespace (determines folder name for data stored): Custom format "YOUR-NAME"
-- Sync
-
-After 15 minutes data should start appearing in the S3 Bucket, you may need to refresh the AWS page to see data being populated. 
 
 
 ## Extracting with Python
@@ -392,3 +365,58 @@ Verify the error section works by setting the API_KEY to nothing in the script
 ```
 api_key = ''
 ```
+
+## Airbyte Cloud
+
+### Introduction
+
+[Airbyte](https://airbyte.com/) Cloud is a fully managed cloud-based data integration platform that enables users to quickly and easily extract data from various sources and load it into their desired destinations. 
+
+It is built on the open-source Airbyte engine, designed to automate complex data pipeline tasks, simplifying data integration and freeing up engineering time for higher-value tasks.
+
+### Sign up for Airbyte Cloud
+
+On [Airbyte's](https://airbyte.com/) website sign up for a trial Cloud account, valid for 14 days. 
+
+If you have already signed up for an account use your email address with a '+' after the username, e.g. will.sutton+1@email.co.uk, will.sutton+airbyte@email.co.uk
+
+### Create a New Connection
+
+A connection is a pipeline from a data source system, e.g. Amplitude, Mailchimp, LinkedIn to the destination location, typically a data lake or warehouse, e.g. Snowflake, Amazon S3 Bucket, Azure Blob Storage.
+
+### Create a New Connection
+
+### Create New Source
+- Search for and select FreeAgent. However this is the production API and we have set up a Sandbox. Click the 'Fork in Builder' button on the bottom left. Use a text editor to change all instances of production URLs in the YAML to the sandbox variation.
+- Configure inputs from LastPass
+
+### Create a New Destination
+
+Create new destination
+- Set up a new destination
+- Select S3 (found under marketplace)
+
+Create a source
+- Enter S3 details as follows:
+    - Access Key ID: &lt;stored in LastPass&gt;
+    - Secret Access Key: &lt;stored in LastPass&gt;
+    - S3 Bucket Name: &lt;stored in LastPass&gt;
+    - S3 Bucket Path: airbyte-sync/&lt;DESX-your-name&gt;
+    - S3 Bucket Region: eu-west-2
+- Set the Output Format as JSON
+- Leave all other fields
+- Click Set up destination
+- Test destination
+
+Select streams
+- Select all relevant streams (Contacts, Invoices, Projects, Timeslips, Users)
+- Sync mode: Append for all, Incremental where possible, 
+i.e. "Incremental | Append", otherwise "Full refresh | Append"
+
+Configure connection
+- Schedule Type: Scheduled
+- Replication frequency: Every 24 hours
+- Destination Namespace (determines folder name for data stored): Custom format "YOUR-NAME"
+- Sync
+
+After 15 minutes data should start appearing in the S3 Bucket, you may need to refresh the AWS page to see data being populated. 
