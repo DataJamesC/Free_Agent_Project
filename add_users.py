@@ -42,7 +42,7 @@ first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat", "Ril
 last_names = ["Smith", "Jones", "Taylor", "Brown", "Williams", "Wilson", "Johnson", "Davies", "Patel", "Wright"]
 roles = ["Director", "Employee", "Employee", "Employee", "Shareholder"]
 
-print("\n--- Seeding 10 Users ---")
+print("\n--- Seeding Users ---")
 
 for i in range(1, 301):
     f_name = random.choice(first_names)
