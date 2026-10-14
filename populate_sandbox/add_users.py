@@ -44,7 +44,7 @@ roles = ["Director", "Employee", "Employee", "Employee", "Shareholder"]
 
 print("\n--- Seeding Users ---")
 
-for i in range(1, 301):
+for i in range(1, 51):
     f_name = random.choice(first_names)
     l_name = f"{random.choice(last_names)}{i}"
     
@@ -63,9 +63,9 @@ for i in range(1, 301):
 
     if res.status_code in (200, 201):
         user_url = res.json()["user"]["url"]
-        print(f"[{i}/10] Created User: {f_name} {l_name} ({user_url})")
+        print(f"[{i}/50] Created User: {f_name} {l_name} ({user_url})")
     else:
-        print(f"[{i}/10] Failed User: {res.status_code} - {res.text}")
+        print(f"[{i}/50] Failed User: {res.status_code} - {res.text}")
 
     time.sleep(0.5)
 

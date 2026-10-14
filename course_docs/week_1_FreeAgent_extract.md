@@ -31,106 +31,7 @@ Data extraction methods can also include: Web Scraping and Parsing, Optical Char
 - **Budget Constraints** Balancing costs with the need for effective extraction solutions.
 - **Compliance** Adhering to data governance standards and regulations.
 
-## Airbyte Cloud
-
-### Introduction
-
-[Airbyte](https://airbyte.com/) Cloud is a fully managed cloud-based data integration platform that enables users to quickly and easily extract data from various sources and load it into their desired destinations. 
-
-It is built on the open-source Airbyte engine, designed to automate complex data pipeline tasks, simplifying data integration and freeing up engineering time for higher-value tasks.
-
-### Sign up for Airbyte Cloud
-
-On [Airbyte's](https://airbyte.com/) website sign up for a trial Cloud account, valid for 14 days. 
-
-If you have already signed up for an account use your email address with a '+' after the username, e.g. will.sutton+1@email.co.uk, will.sutton+airbyte@email.co.uk
-
-### Create a New Connection
-
-A connection is a pipeline from a data source system, e.g. Amplitude, Mailchimp, LinkedIn to the destination location, typically a data lake or warehouse, e.g. Snowflake, Amazon S3 Bucket, Azure Blob Storage.
-
-### Create a New Connection
-
-### Create New Source
-- Search for and select FreeAgent. However this is the production API and we have set up a Sandbox. Click the 'Fork in Builder' button on the bottom left. Use a text editor to change all instances of production URLs in the YAML to the sandbox variation.
-- Configure inputs from LastPass
-
-### Create a New Destination
-
-Create new destination
-- Set up a new destination
-- Select S3 (found under marketplace)
-
-Create a source
-- Enter S3 details as follows:
-    - Access Key ID: &lt;stored in LastPass&gt;
-    - Secret Access Key: &lt;stored in LastPass&gt;
-    - S3 Bucket Name: &lt;stored in LastPass&gt;
-    - S3 Bucket Path: airbyte-sync/&lt;DESX-your-name&gt;
-    - S3 Bucket Region: eu-west-2
-- Set the Output Format as JSON
-- Leave all other fields
-- Click Set up destination
-- Test destination
-
-Select streams
-- Select all relevant streams (Contacts, Invoices, Projects, Timeslips, Users)
-- Sync mode: Append for all, Incremental where possible, 
-i.e. "Incremental | Append", otherwise "Full refresh | Append"
-
-Configure connection
-- Schedule Type: Scheduled
-- Replication frequency: Every 24 hours
-- Destination Namespace (determines folder name for data stored): Custom format "YOUR-NAME"
-- Sync
-
-After 15 minutes data should start appearing in the S3 Bucket, you may need to refresh the AWS page to see data being populated. 
-
-
-## Extracting with Python
-
-### Freeagent's API
-
-- Documentation: https://dev.freeagent.com/docs
-
-FreeAgent uses standard HTTP verbs and JSON payloads across its REST endpoints:
-
-| Endpoint | Entity Description | Key Modeling Purpose |
-| :--- | :--- | :--- |
-| `/v2/contacts` | Clients and Suppliers | **Customer / Supplier Dimension** |
-| `/v2/users` | Internal Staff and Directors | **Employee Dimension** |
-| `/v2/projects` | Billable Engagements | **Project Dimension** (links work to customers) |
-| `/v2/invoices` | Billing Summaries & Line Items | **Sales Revenue Fact Table** |
-| `/v2/timeslips` | Logged Work Hours | **Labor & Utilization Fact Table** |
-
-### Make a plan
-
-Plan how you would write your Python scripts to extract the data from this API. This does not need to be perfect code, in fact it should be "pseudo" code - a plain english description of the steps you'd like to take. 
-
-For example:
-
-- Create Python file
-- Check Python version
-- Decide what libraries to use
-- etc.
-
-Consider the concepts discussed in Extract Fundamentals and think about how you would incorporate them.
-
-### The Calls
-Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint 
-
-### Example url, headers
-url = "https://api.sandbox.freeagent.com/v2/invoices"
-headers = {
-    "Authorization": f"Bearer {access_token}",
-    "Accept": "application/json",
-    "User-Agent": "FreeAgentExtractor/1.0",
-}
-
-# Make the Get
-response = requests.get(url, params=params, headers=headers)
-
-### Python Environment Setup
+## Python Environment Setup
 
 Create a directory for 'FreeAgent'
 ```
@@ -152,7 +53,7 @@ Create a .env file.
 touch .env
 ```
 
-Edit the .env file to include the following variables, edited with the correct keys.
+Edit the .env file to include the following variables. We will edit these with the correct keys once they've been created.
 ```
 FREEAGENT_CLIENT_ID = 'xxxxxxxxxxxxxxxxxx'
 FREEAGENT_CLIENT_SECRET = 'xxxxxxxxxxxxxxxxxx'
@@ -185,11 +86,139 @@ Create/edit a .gitignore file to prevent your credentials and data from being sh
 *\data*
 ```
 
+## The Free Agent Sandbox
+
+### Introduction
+
+We need to start by making a sandbox FreeAgent account for our new businesses. We'll then be able to populate these sandboxes with fake data, simulating a production FreeAgent and allowing us to create a pipeline for simulated business data. 
+
+### Sign up for your sandbox
+
+On the sandbox freeagent website (https://signup.sandbox.freeagent.com/signup), sign up for a free trial account, valid for 30 days.
+
+The details that you put into your business can be anything and do not factor into how we proceed.
+
+### Register an Application on the FreeAgent Developer Dashboard
+
+Navigate to the FreeAgent Developer Dashboard (https://dev.freeagent.com/) and log in using the Sandbox account email and password that we just created.
+
+Click Create New App. Give the app a name and description of your choosing. Add http://localhost:8080/callback to the section with OAuth redirect URIs (no need to remove the other two, though they aren't needed now). Click Create App, and note the OAuth identifier and OAuth Secret. These will be added to our .env file later to act as the credentials for our API calls.
+
+### Obtain your Initial Authorization Code
+
+FreeAgent requires an OAuth 2.0 handshake before you can call the API via code. We need to find our Initial Authorization Code, which we can then use to generate a Refresh token. This Refresh token can then live in our .env file, so this is a one-time process.
+
+Copy the following URL, replacing <YOUR_CLIENT_ID> with your actual OAuth Identifier logged above:
+```
+https://api.sandbox.freeagent.com/v2/approve_app?client_id=<YOUR_CLIENT_ID>&response_type=code&redirect_uri=http://localhost:8080/callback
+```
+
+This should pop up a window Approving account access for the app you just created. Hit approve. (you may need to confirm your FreeAgent account first if not done earlier).
+
+The next page should read 'This site can't be reached'. Have no fear, this has still worked. The url should look something like this - http://localhost:8080/callback?code=1JyWiv3R8txB_IEMjV8_FxkGfvstA2QgKPJpUV1vz&state=. Make a note of the code. This is your Initial Authorization Code.
+
+### Using this code to get your FreeAgent Refresh Token
+
+Create a .py file in your repo called get_token.py. Use the below script to generate your Refresh Token, and store it in your .env 
+
+<details>
+<summary>get_token script</summary>
+
+```
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+CLIENT_ID = os.getenv("FREEAGENT_CLIENT_ID")
+CLIENT_SECRET = os.getenv("FREEAGENT_CLIENT_SECRET")
+
+if not CLIENT_ID or not CLIENT_SECRET:
+    print("Error: FREEAGENT_CLIENT_ID or FREEAGENT_CLIENT_SECRET missing from .env")
+    exit(1)
+
+# Prompt interactively so no code is ever saved to disk
+auth_code = input("Paste the 'code' parameter from your browser URL: ").strip()
+
+url = "https://api.sandbox.freeagent.com/v2/token_endpoint"
+
+payload = {
+    "grant_type": "authorization_code",
+    "code": auth_code,
+    "redirect_uri": "http://localhost:8080/callback",
+}
+
+response = requests.post(
+    url,
+    data=payload,
+    auth=(CLIENT_ID, CLIENT_SECRET),
+    headers={"Accept": "application/json"},
+)
+
+if response.status_code == 200:
+    data = response.json()
+    print("\n Success! Add this line to your .env file:\n")
+    print(f'FREEAGENT_REFRESH_TOKEN="{data.get("refresh_token")}"')
+else:
+    print(f"\n Error {response.status_code}: {response.text}")
+```
+</details>
+
+## Populating the Sand Box
+
+We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account.
+
+## Extracting with Python
+
+### Freeagent's API
+
+- Documentation: https://dev.freeagent.com/docs
+
+FreeAgent uses standard HTTP verbs and JSON payloads across its REST endpoints:
+
+| Endpoint | Entity Description | Key Modeling Purpose |
+| :--- | :--- | :--- |
+| `/v2/contacts` | Clients and Suppliers | **Customer / Supplier Dimension** |
+| `/v2/users` | Internal Staff and Directors | **Employee Dimension** |
+| `/v2/projects` | Billable Engagements | **Project Dimension** (links work to customers) |
+| `/v2/invoices` | Billing Summaries & Line Items | **Sales Revenue Fact Table** |
+| `/v2/timeslips` | Logged Work Hours | **Labor & Utilization Fact Table** |
+
+### Make a plan
+
+Plan how you would write your Python scripts to extract the data from this API. This does not need to be perfect code, in fact it should be "pseudo" code - a plain english description of the steps you'd like to take. 
+
+For example:
+
+- Create Python file
+- Check Python version
+- Decide what libraries to use
+- etc.
+
+Consider the concepts discussed in Extract Fundamentals and think about how you would incorporate them.
+
+### The Calls
+Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint. You can see an example of this in the population scripts we just used. 
+
+### Example url, headers
+url = "https://api.sandbox.freeagent.com/v2/invoices"
+headers = {
+    "Authorization": f"Bearer {access_token}",
+    "Accept": "application/json",
+    "User-Agent": "FreeAgentExtractor/1.0",
+}
+
+# Make the Get
+response = requests.get(url, params=params, headers=headers)
+
+
 ### Python Script
 
 Now it's time to write your Python script. Build up the script incrementally, first verifying that you're able to connect to the API. Then work to include elements of your plan.
 
 Below is an example Python script that extracts data from the contacts endpoint. Only use this if you're struggling.
+
 
 <details>
 <summary>freeagent_extract</summary>
@@ -278,6 +307,7 @@ with open(output_path, "w", encoding="utf-8") as f:
 print(f"\nExtraction complete! Saved {len(all_contacts)} contacts to {output_path}")
 
 ```
+
 </details>
 
 #### Logging
@@ -392,3 +422,58 @@ Verify the error section works by setting the API_KEY to nothing in the script
 ```
 api_key = ''
 ```
+
+## Airbyte Cloud
+
+### Introduction
+
+[Airbyte](https://airbyte.com/) Cloud is a fully managed cloud-based data integration platform that enables users to quickly and easily extract data from various sources and load it into their desired destinations. 
+
+It is built on the open-source Airbyte engine, designed to automate complex data pipeline tasks, simplifying data integration and freeing up engineering time for higher-value tasks.
+
+### Sign up for Airbyte Cloud
+
+On [Airbyte's](https://airbyte.com/) website sign up for a trial Cloud account, valid for 14 days. 
+
+If you have already signed up for an account use your email address with a '+' after the username, e.g. will.sutton+1@email.co.uk, will.sutton+airbyte@email.co.uk
+
+### Create a New Connection
+
+A connection is a pipeline from a data source system, e.g. Amplitude, Mailchimp, LinkedIn to the destination location, typically a data lake or warehouse, e.g. Snowflake, Amazon S3 Bucket, Azure Blob Storage.
+
+### Create a New Connection
+
+### Create New Source
+- Search for and select FreeAgent. However this is the production API and we have set up a Sandbox. Click the 'Fork in Builder' button on the bottom left. Use a text editor to change all instances of production URLs in the YAML to the sandbox variation.
+- Configure inputs from LastPass
+
+### Create a New Destination
+
+Create new destination
+- Set up a new destination
+- Select S3 (found under marketplace)
+
+Create a source
+- Enter S3 details as follows:
+    - Access Key ID: &lt;stored in LastPass&gt;
+    - Secret Access Key: &lt;stored in LastPass&gt;
+    - S3 Bucket Name: &lt;stored in LastPass&gt;
+    - S3 Bucket Path: airbyte-sync/&lt;DESX-your-name&gt;
+    - S3 Bucket Region: eu-west-2
+- Set the Output Format as JSON
+- Leave all other fields
+- Click Set up destination
+- Test destination
+
+Select streams
+- Select all relevant streams (Contacts, Invoices, Projects, Timeslips, Users)
+- Sync mode: Append for all, Incremental where possible, 
+i.e. "Incremental | Append", otherwise "Full refresh | Append"
+
+Configure connection
+- Schedule Type: Scheduled
+- Replication frequency: Every 24 hours
+- Destination Namespace (determines folder name for data stored): Custom format "YOUR-NAME"
+- Sync
+
+After 15 minutes data should start appearing in the S3 Bucket, you may need to refresh the AWS page to see data being populated. 
