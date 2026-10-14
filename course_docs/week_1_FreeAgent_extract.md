@@ -31,79 +31,7 @@ Data extraction methods can also include: Web Scraping and Parsing, Optical Char
 - **Budget Constraints** Balancing costs with the need for effective extraction solutions.
 - **Compliance** Adhering to data governance standards and regulations.
 
-## The Free Agent Sandbox
-
-### Introduction
-
-We need to start by making a sandbox FreeAgent account for our new businesses. We'll then be able to populate these sandboxes with fake data, simulating a production FreeAgent and allowing us to create a pipeline for simulated business data. 
-
-### Sign up for your sandbox
-
-On the sandbox freeagent website (https://signup.sandbox.freeagent.com/signup), sign up for a free trial account, valid for 30 days.
-
-The details that you put into your business can be anything and do not factor into how we proceed.
-
-### Register an Application on the FreeAgent Developer Dashboard
-
-Navigate to the FreeAgent Developer Dashboard (https://dev.freeagent.com/) and log in using the Sandbox account email and password that we just created.
-
-Click Create New App. Give the app a name and description of your choosing. Add http://localhost:8080/callback to the section with OAuth redirect URIs (no need to remove the other two, though they aren't needed now). Click Create App, and note the OAuth identifier and OAuth Secret. These will be added to our .env file later to act as the credentials for our API calls.
-
-### Obtain your Initial Authorization Code
-
-FreeAgent requires an OAuth 2.0 handshake before you can call the API via code. We need to find our Initial Authorization Code, which we can then use to generate a Refresh token. This Refresh token can then live in our .env file, so this is a one-time process.
-
-Copy the following URL, replacing <YOUR_CLIENT_ID> with your actual OAuth Identifier logged above:
-```
-https://api.sandbox.freeagent.com/v2/approve_app?client_id=<YOUR_CLIENT_ID>&response_type=code&redirect_uri=http://localhost:8080/callback
-```
-
-
-
-## Extracting with Python
-
-### Freeagent's API
-
-- Documentation: https://dev.freeagent.com/docs
-
-FreeAgent uses standard HTTP verbs and JSON payloads across its REST endpoints:
-
-| Endpoint | Entity Description | Key Modeling Purpose |
-| :--- | :--- | :--- |
-| `/v2/contacts` | Clients and Suppliers | **Customer / Supplier Dimension** |
-| `/v2/users` | Internal Staff and Directors | **Employee Dimension** |
-| `/v2/projects` | Billable Engagements | **Project Dimension** (links work to customers) |
-| `/v2/invoices` | Billing Summaries & Line Items | **Sales Revenue Fact Table** |
-| `/v2/timeslips` | Logged Work Hours | **Labor & Utilization Fact Table** |
-
-### Make a plan
-
-Plan how you would write your Python scripts to extract the data from this API. This does not need to be perfect code, in fact it should be "pseudo" code - a plain english description of the steps you'd like to take. 
-
-For example:
-
-- Create Python file
-- Check Python version
-- Decide what libraries to use
-- etc.
-
-Consider the concepts discussed in Extract Fundamentals and think about how you would incorporate them.
-
-### The Calls
-Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint 
-
-### Example url, headers
-url = "https://api.sandbox.freeagent.com/v2/invoices"
-headers = {
-    "Authorization": f"Bearer {access_token}",
-    "Accept": "application/json",
-    "User-Agent": "FreeAgentExtractor/1.0",
-}
-
-# Make the Get
-response = requests.get(url, params=params, headers=headers)
-
-### Python Environment Setup
+## Python Environment Setup
 
 Create a directory for 'FreeAgent'
 ```
@@ -157,6 +85,86 @@ Create/edit a .gitignore file to prevent your credentials and data from being sh
 .venv
 *\data*
 ```
+
+## The Free Agent Sandbox
+
+### Introduction
+
+We need to start by making a sandbox FreeAgent account for our new businesses. We'll then be able to populate these sandboxes with fake data, simulating a production FreeAgent and allowing us to create a pipeline for simulated business data. 
+
+### Sign up for your sandbox
+
+On the sandbox freeagent website (https://signup.sandbox.freeagent.com/signup), sign up for a free trial account, valid for 30 days.
+
+The details that you put into your business can be anything and do not factor into how we proceed.
+
+### Register an Application on the FreeAgent Developer Dashboard
+
+Navigate to the FreeAgent Developer Dashboard (https://dev.freeagent.com/) and log in using the Sandbox account email and password that we just created.
+
+Click Create New App. Give the app a name and description of your choosing. Add http://localhost:8080/callback to the section with OAuth redirect URIs (no need to remove the other two, though they aren't needed now). Click Create App, and note the OAuth identifier and OAuth Secret. These will be added to our .env file later to act as the credentials for our API calls.
+
+### Obtain your Initial Authorization Code
+
+FreeAgent requires an OAuth 2.0 handshake before you can call the API via code. We need to find our Initial Authorization Code, which we can then use to generate a Refresh token. This Refresh token can then live in our .env file, so this is a one-time process.
+
+Copy the following URL, replacing <YOUR_CLIENT_ID> with your actual OAuth Identifier logged above:
+```
+https://api.sandbox.freeagent.com/v2/approve_app?client_id=<YOUR_CLIENT_ID>&response_type=code&redirect_uri=http://localhost:8080/callback
+```
+
+This should pop up a window Approving account access for the app you just created. Hit approve. (you may need to confirm your FreeAgent account first if not done earlier).
+
+The next page should read 'This site can't be reached'. Have no fear, this has still worked. The url should look something like this - http://localhost:8080/callback?code=1JyWiv3R8txB_IEMjV8_FxkGfvstA2QgKPJpUV1vz&state=. Make a note of the code. This is your Initial Authorization Code.
+
+### Using this code to get your FreeAgent Refresh Token
+
+Create a .py file in your repo called get_token.py. 
+
+
+## Extracting with Python
+
+### Freeagent's API
+
+- Documentation: https://dev.freeagent.com/docs
+
+FreeAgent uses standard HTTP verbs and JSON payloads across its REST endpoints:
+
+| Endpoint | Entity Description | Key Modeling Purpose |
+| :--- | :--- | :--- |
+| `/v2/contacts` | Clients and Suppliers | **Customer / Supplier Dimension** |
+| `/v2/users` | Internal Staff and Directors | **Employee Dimension** |
+| `/v2/projects` | Billable Engagements | **Project Dimension** (links work to customers) |
+| `/v2/invoices` | Billing Summaries & Line Items | **Sales Revenue Fact Table** |
+| `/v2/timeslips` | Logged Work Hours | **Labor & Utilization Fact Table** |
+
+### Make a plan
+
+Plan how you would write your Python scripts to extract the data from this API. This does not need to be perfect code, in fact it should be "pseudo" code - a plain english description of the steps you'd like to take. 
+
+For example:
+
+- Create Python file
+- Check Python version
+- Decide what libraries to use
+- etc.
+
+Consider the concepts discussed in Extract Fundamentals and think about how you would incorporate them.
+
+### The Calls
+Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint 
+
+### Example url, headers
+url = "https://api.sandbox.freeagent.com/v2/invoices"
+headers = {
+    "Authorization": f"Bearer {access_token}",
+    "Accept": "application/json",
+    "User-Agent": "FreeAgentExtractor/1.0",
+}
+
+# Make the Get
+response = requests.get(url, params=params, headers=headers)
+
 
 ### Python Script
 
