@@ -123,6 +123,7 @@ Create a .py file in your repo called get_token.py.
 
 <details>
 <summary>get_token script</summary>
+
 ```
 import os
 import requests
@@ -214,10 +215,11 @@ Now it's time to write your Python script. Build up the script incrementally, fi
 
 Below is an example Python script that extracts data from the contacts endpoint. Only use this if you're struggling.
 
-```
+
 <details>
 <summary>freeagent_extract</summary>
 
+```
 # Extract ALL Contacts (Customer/Supplier Dimension) with Pagination from FreeAgent API v2
 # Docs: https://dev.freeagent.com/docs/contacts
 
