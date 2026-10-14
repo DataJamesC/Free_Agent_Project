@@ -132,12 +132,12 @@ response = requests.get(url, params=params, headers=headers)
 
 ### Python Environment Setup
 
-Create a directory for 'amplitude'
+Create a directory for 'FreeAgent'
 ```
 mkdir -p FreeAgent
 ```
 
-Navigate to the amplitude folder.
+Navigate to the new folder.
 ```
 cd FreeAgent
 ```
