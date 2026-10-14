@@ -213,11 +213,11 @@ response = requests.get(url, params=params, headers=headers)
 Now it's time to write your Python script. Build up the script incrementally, first verifying that you're able to connect to the API. Then work to include elements of your plan.
 
 Below is an example Python script that extracts data from the contacts endpoint. Only use this if you're struggling.
+
 ```
 <details>
 <summary>freeagent_extract</summary>
 
-```
 # Extract ALL Contacts (Customer/Supplier Dimension) with Pagination from FreeAgent API v2
 # Docs: https://dev.freeagent.com/docs/contacts
 
