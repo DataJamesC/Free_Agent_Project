@@ -103,10 +103,9 @@ Typically, the JSON structures can be parsed into a table using these selectors:
 
 ```
 SELECT 
-json_data:"$insert_id"::string as "$insert_id",
-json_data:"$insert_key"::string as "$insert_key",
-json_data:event_properties
-FROM amplitude_events_raw;
+json_data:"account_balance"::string as "$account_balance",
+json_data:"country"::string as "country"
+FROM raw_table;
 ```
 
 And fields from nested arrays can be accessed as:
@@ -120,9 +119,9 @@ FROM table
 
 Before we built our silver layer, it's important to plan it. Time to build our snowflake schema while taking into account the business requirements / questions: 
 
-Overdue Debt & Aging: Which clients owe money, and how long has each invoice been overdue?
-Payment Reliability: Which clients consistently pay late compared to their agreed payment terms?
-Monthly Cash Flow: How does total invoiced revenue compare to cash actually collected each month?
+- Overdue Debt & Aging: Which clients owe money, and how long has each invoice been overdue
+- Payment Reliability: Which clients consistently pay late compared to their agreed payment terms?
+- Monthly Cash Flow: How does total invoiced revenue compare to cash actually collected each month?
 
 ## Create Tables
 
@@ -193,7 +192,7 @@ Stored procedures are scripts saved in the database that you can call to perform
 A Snowflake stored procedure code is wrapped in a function taking the snowpark_session and any arguments you have given as options. The snowpark_session will give you access to execute SQL queries through Python.
 
 
-### Example: Rebuild the City Table
+### Example: Rebuild the Contacts Table
 
 The Stored Procedure below will rebuild a table containing details about Contacts. Please modify the code below for one of your tables and test it.
 
