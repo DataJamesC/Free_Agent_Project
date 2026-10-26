@@ -5,8 +5,9 @@
 
 ## Learning Objectives
 - Considerations for Extracting Data
-- Introduction to Airbyte Cloud
 - Extracting with Python
+- Introduction to Airbyte Cloud
+
 
 ## Considerations for Extracting Data
 
@@ -81,7 +82,7 @@ pip freeze > requirements.txt
 
 Create/edit a .gitignore file to prevent your credentials and data from being shared.
 ```
-*.env
+.env
 .venv
 *\data*
 ```
@@ -167,7 +168,14 @@ else:
 
 ## Populating the Sand Box
 
-We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account.
+We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account. There are variables within the scripts to control how many data points get entered into your sandbox.
+
+There are five pre-built scripts in the populate sandbox folder that should be run in order due to dependencies:
+    1. Contacts
+    2. Users
+    3. Projects
+    4. Invoices
+    5. Timeslips
 
 ## Extracting with Python
 
@@ -209,7 +217,7 @@ headers = {
     "User-Agent": "FreeAgentExtractor/1.0",
 }
 
-# Make the Get
+# Make the Gets
 response = requests.get(url, params=params, headers=headers)
 
 
@@ -217,7 +225,7 @@ response = requests.get(url, params=params, headers=headers)
 
 Now it's time to write your Python script. Build up the script incrementally, first verifying that you're able to connect to the API. Then work to include elements of your plan.
 
-Below is an example Python script that extracts data from the contacts endpoint. Only use this if you're struggling.
+Below is an example Python script that extracts data from the contacts endpoint. Only use this if you're struggling. This is set up to output the data locally rather than to S3.
 
 
 <details>
@@ -309,6 +317,8 @@ print(f"\nExtraction complete! Saved {len(all_contacts)} contacts to {output_pat
 ```
 
 </details>
+
+We want to create extract scripts for all five of our targeted endpoints (examples can be found in this repo)
 
 #### Logging
 

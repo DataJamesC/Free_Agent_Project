@@ -68,15 +68,9 @@ Throughout this process, we'll be applying some key data security concepts to pr
 
 ## Setting Up AWS S3 for Secure Snowflake Integration
 
-![](../course_docs/images/aws_load_diagram.png)
-
 #### What is a Snowflake Storage Integration?
 
 A Snowflake storage integration allows secure and seamless access to an Amazon S3 bucket by associating Snowflake with an IAM user configured for your account.
-
-<a href="https://docs.snowflake.com/en/user-guide/data-load-s3-config-storage-integration">
-    <img src="https://docs.snowflake.com/en/_images/storage-integration-s3.png" width ="90%">
-  </a>
 
 1. An external (i.e. S3) stage references a storage integration object in its definition.
 
@@ -86,41 +80,11 @@ A Snowflake storage integration allows secure and seamless access to an Amazon S
 
 Source: https://docs.snowflake.com/en/user-guide/data-load-s3-config-storage-integration
 
-## Step 0. Personalising This Document
+## Setting up AWS
 
-This walkthrough contains a number of AWS CLI scripts that require your name and account number. To reduce the manual effort you can run a script to customise all the commands in the walkthrough and it's supporting docs.
+We're going to use the GUI to set everything up for AWS.
 
-- In the AWS folder, create an file `.aws_env` with your name and aws account number, e.g.
-
-YOUR_NAME='wjsutton'\
-AWS_ACCOUNT_ID=123456789012\
-PROFILE_NAME='default'\
-COHORT='DESxx'\
-PROJECT='des_freeagent'
-
-- Then run the python script [aws/personalise.py](../aws/personalise.py)
-
-```
-python aws/personalise.py
-```
-
-- Confirm in the folder 'aws' a new folder 'week_2' has been added
-- Confirm in the folder 'course*docs' a 'confidential*' version of this walkthrough has been added
-
-
-
-Assuming you have configured a profile correctly in your `./aws/configure` file, using that profile to login with the below command should work.
-
-```
-aws sso login --profile <profile-name>
-```
-
-#### Using the AWS CLI
-
-For Bike Point, we used the GUI to set everything up for AWS. Today you'll be trying things out with the CLI. However, if you get stuck with the CLI, you can find instructions for doing it using the GUI below.
-
-<details>
-<summary>AWS GUI Instructions</summary>
+### AWS GUI Instructions
 
 ### In the AWS Console
 
@@ -282,134 +246,7 @@ The trust policy should look like this.
 		}
 	]
 }
-```
-
-## </details>
-
-\
-Open terminal and login to AWS via the CLI single sign on. If you are having trouble please check the notes to configure the AWS CLI on [Notion](https://www.notion.so/theinformationlab/How-to-configure-the-AWS-CLI-for-access-to-TIL-AWS-resources-1e75772ad0a280d9aaebd8bb6fd937e6).
-
-### Step 1: Create S3 Bucket and KMS Key
-
-**Create KMS Key**
-
-```
-aws kms create-key --description "KMS key for freeagent S3 bucket encryption" --region eu-west-2 --profile <profile-name> --tags TagKey=creator,TagValue=<your-name> TagKey=cohort,TagValue=<cohort> TagKey=project,TagValue=<project> TagKey=Usage,TagValue=Training
-```
-
-After KEYMETADATA, record the ARN, noting the KeyId from the output, e.g. arn:aws:kms:eu-west-2:<account_id>:key/`KeyId` then create an alias for the key.
-
-Update this command with:
-
-- KMS Alias: **your-name-freeagent-kms-key**
-- KeyId: **KeyId** from-previous-command
-
-```
-aws kms create-alias --alias-name alias/<your-name>-freeagent-kms-key --target-key-id <KeyId> --region eu-west-2 --profile <profile-name>
-```
-
-**Create S3 Bucket**
-
-Update this command with:
-
-- Bucket name: **your-name-freeagent-storage**
-
-```
-aws s3api create-bucket --bucket <your-name>-freeagent-storage --create-bucket-configuration LocationConstraint=eu-west-2 --profile <profile-name>
-```
-And apply the tagging after:
-```
-aws s3api put-bucket-tagging --bucket <your-name>-freeagent-storage --profile <profile-name> --tagging 'TagSet=[{Key=creator,Value=<your-name>},{Key=cohort,Value=<cohort>},{Key=project,Value=<project>},{Key=Usage,Value=Training}]'
-```
-
-**Secure Bucket**
-
-Enable encryption
-
-Update this command with:
-
-- Bucket name: **your-name-freeagent-storage**
-- KMS Alias: **your-name-freeagent-kms-key** in `aws/week_2/s3-bucket-encryption.json`
-
-```
-aws s3api put-bucket-encryption --bucket <your-name>-freeagent-storage --server-side-encryption-configuration file://aws/week_2/s3-bucket-encryption.json --profile <profile-name>
-```
-
-Block public access
-
-Update this command with:
-
-- Bucket name: **your-name-freeagent-storage**
-
-```
-aws s3api put-public-access-block --bucket <your-name>-freeagent-storage --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true --profile <profile-name>
-```
-
-Disable ACLs
-
-Update this command with:
-
-- Bucket name: **your-name-freeagent-storage**
-
-```
-aws s3api put-bucket-ownership-controls --bucket <your-name>-freeagent-storage --ownership-controls "Rules=[{ObjectOwnership=BucketOwnerEnforced}]" --profile <profile-name>
-```
-
-**Create Folder for Data Import**
-
-Update these commands with:
-
-- Bucket name: **your-name-freeagent-storage**
-
-```
-aws s3api put-object --bucket <your-name>-freeagent-storage --key python-import/ --profile <profile-name>
-```
-
-### Step 2: Create IAM Policies to Upload to AWS
-
-**Get Your KMS Key ARN**
-
-Either recall it from earlier, it has the form: arn:aws:kms:eu-west-2:account_id:key/`KeyId`
-Or run this command with your KMS Alias: **your-name-freeagent-kms-key**
-
-```
-aws kms describe-key --key-id alias/<your-name>-freeagent-kms-key --region eu-west-2 --query 'KeyMetadata.Arn' --output text --profile <profile-name>
-```
-
-**Update IAM Policies with KMS Key ARN**
-
-For these files, update the bucket name and update line 22 with your KMS Key ARN:
-
-- [aws/week_2/iam-policy-python.json](../aws/week_2/iam-policy-python.json)
-
-**Create the Policies and Record the ARNs**
-
-```
-aws iam create-policy --policy-name <your-name>-sts-s3-integration-python --policy-document file://aws/week_2/iam-policy-python.json --profile <profile-name> --tags 'Key=creator,Value=<your-name>' 'Key=cohort,Value=<cohort>' 'Key=project,Value=<project>' 'Key=Usage,Value=Training'
-```
-
-**Create IAM Users**
-
-```
-aws iam create-user --user-name <your-name>_freeagent_python_uploader --profile <profile-name> --tags 'Key=creator,Value=<your-name>' 'Key=cohort,Value=<cohort>' 'Key=project,Value=<project>' 'Key=Usage,Value=Training'
-```
-
-**Attach Policies to Users**
-
-```
-aws iam attach-user-policy --user-name <your-name>_freeagent_python_uploader --policy-arn arn:aws:iam::<account-id>:policy/<your-name>-sts-s3-integration-python --profile <profile-name>
-```
-
-**Create and Record Access Keys**
-
-```
-aws iam create-access-key --user-name <your-name>_freeagent_python_uploader --profile <profile-name>
-```
-
-Record the Access Key and the Secret Key
-
-- In Python we will reference these values to upload to the S3 Bucket
-
+``
 ---
 
 ## Loading with Python
