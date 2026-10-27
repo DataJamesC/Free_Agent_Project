@@ -171,11 +171,11 @@ else:
 We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account. There are variables within the scripts to control how many data points get entered into your sandbox.
 
 There are five pre-built scripts in the populate sandbox folder that should be run in order due to dependencies:
-    1. Contacts
-    2. Users
-    3. Projects
-    4. Invoices
-    5. Timeslips
+-    1. Contacts
+-    2. Users
+-    3. Projects
+-    4. Invoices
+-    5. Timeslips
 
 ## Extracting with Python
 
