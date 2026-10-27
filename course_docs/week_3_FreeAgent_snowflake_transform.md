@@ -206,7 +206,7 @@ returns varchar
 language sql
 as
 $$
-CREATE OR REPLACE TABLE FREEAGENT_ANALYTICS.DIM_CONTACTS AS
+CREATE OR REPLACE TABLE FREEAGENT_ANALYTICS.DIM_CONTACTS   AS
 SELECT
     CAST(REGEXP_SUBSTR(c.value:url::STRING, '/contacts/([0-9]+)$', 1, 1, 'e') AS INT) AS contact_id,
     c.value:organisation_name::STRING AS organisation_name,
