@@ -58,14 +58,12 @@ while True:
     data = response.json()
     contacts_batch = data.get("contacts", [])
 
-    # Exit loop if no records are returned
     if not contacts_batch:
         break
 
     all_contacts.extend(contacts_batch)
     print(f"Page {page}: Fetched {len(contacts_batch)} contacts (Total: {len(all_contacts)})")
 
-    # If the returned batch is smaller than per_page, we've reached the last page
     if len(contacts_batch) < per_page:
         break
 
