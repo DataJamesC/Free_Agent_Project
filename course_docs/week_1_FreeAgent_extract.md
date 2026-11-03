@@ -34,6 +34,8 @@ Data extraction methods can also include: Web Scraping and Parsing, Optical Char
 
 ## Python Environment Setup
 
+These directions are for a BASH terminal. If you are in Powershell or otherwise you may experience some errors, for example trying to touch.env.
+
 Create a directory for 'FreeAgent'
 ```
 mkdir -p FreeAgent
@@ -116,7 +118,7 @@ https://api.sandbox.freeagent.com/v2/approve_app?client_id=<YOUR_CLIENT_ID>&resp
 
 This should pop up a window Approving account access for the app you just created. Hit approve. (you may need to confirm your FreeAgent account first if not done earlier).
 
-The next page should read 'This site can't be reached'. Have no fear, this has still worked. The url should look something like this - http://localhost:8080/callback?code=1JyWiv3R8txB_IEMjV8_FxkGfvstA2QgKPJpUV1vz&state=. Make a note of the code. This is your Initial Authorization Code.
+The next page should read 'This site can't be reached'. Have no fear, this has still worked. The url should look something like this - http://localhost:8080/callback?code=1JyWiv3R8txB_IEMjV8_FxkGfvstA2QgKPJpUV1vz&state=. Make a note of the code (which is after code= and finishing before the &state). This is your Initial Authorization Code.
 
 ### Using this code to get your FreeAgent Refresh Token
 
@@ -170,7 +172,7 @@ else:
 
 We need to populate our sand box account with fake data. You can use the scripts provided in the 'populate sandbox' folder to get a headstart. If we run these in our pipeline before we run our extract scripts later, it can simulate new data being created in our account. There are variables within the scripts to control how many data points get entered into your sandbox.
 
-There are five pre-built scripts in the populate sandbox folder that should be run in order due to dependencies:
+There are five pre-built scripts in the populate sandbox folder that should be run in order due to dependencies. Each one has a variable or range where you can alter the volume of fake data:
 -    1. Contacts
 -    2. Users
 -    3. Projects

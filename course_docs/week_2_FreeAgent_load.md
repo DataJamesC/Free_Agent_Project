@@ -226,7 +226,7 @@ An external ID is used to grant access to your AWS resources (such as S3 buckets
 - You have now created an IAM policy for a bucket, created an IAM role, and attached the policy to the role.
 - Click the role and record the Role ARN value
 
-The trust policy should look like this.
+Your role's trust relationship should look like this.
 
 ```
 {
@@ -367,20 +367,6 @@ print("File uploaded")
 
 ### In AWS: Create IAM Policy for Storage Integration to Snowflake
 
-**Create Role**
-
-In the file [aws/week_2/iam-policy-snowflake-trust.json](../aws/week_2/iam-policy-snowflake-trust.json) update with your account id.
-
-```
-aws iam create-role --role-name <your-name>-snowflake-freeagent-python --assume-role-policy-document file://aws/week_2/iam-policy-snowflake-trust.json --description "Role for Snowflake to access S3 python-import folder" --profile <profile-name> --tags 'Key=creator,Value=<your-name>' 'Key=cohort,Value=<cohort>' 'Key=project,Value=<project>' 'Key=Usage,Value=Training'
-```
-
-**Attach Policy**
-
-```
-aws iam attach-role-policy --role-name <your-name>-snowflake-freeagent-python --policy-arn arn:aws:iam::<account-id>:policy/<your-name>-sts-s3-integration-python --profile <profile-name>
-```
-
 ### Configure Snowflake Storage Integration
 
 Snowflake Stages are locations where data files are stored (staged) for loading and unloading data. They are used to move data from one place to another, and the locations for the stages could be internal or external to the Snowflake environment.
@@ -403,13 +389,7 @@ CREATE SCHEMA <your-name>_freeagent_STAGING;
 
 Snowflake Stages are locations where data files are stored (staged) for loading and unloading data. They are used to move data from one place to another, and the locations for the stages could be internal or external to the Snowflake environment.
 
-Businesses can use a Snowflake stage to move their data from external data sources such as S3 buckets to internal Snowflake tables or vice-versa.
-
-### Log in to Snowflake
-
-- Sign in to The Information Lab's Snowflake Account.
-- Database: TIL_DATA_ENGINEERING
-- Role: DATASCHOOL
+Businesses can use a Snowflake stage to move their data from external data sources such as S3 buckets to internal Snowflake tables or vice-versa. 
 
 ### Create Storage Integration
 
@@ -424,11 +404,7 @@ CREATE OR REPLACE STORAGE INTEGRATION <your-name>_freeagent_python_import
   STORAGE_ALLOWED_LOCATIONS = ('s3://<your-name>-freeagent-storage/python-import/');
 ```
 
-STORAGE_AWS_ROLE_ARN is the ARN of the Snowflake via Python role, this command will retrieve it.
-
-```
-aws iam get-role --role-name <your-name>-snowflake-freeagent-python --query 'Role.Arn' --output text
-```
+STORAGE_AWS_ROLE_ARN is the ARN of the Snowflake via Python role, which you can find in the UI of your role on AWS.
 
 2. Verify the Integration
 
@@ -449,7 +425,7 @@ Note the following values from the output:
 
 Granting the IAM user permissions ensures that Snowflake can securely assume the role required to access the specified S3 bucket. Without these permissions, Snowflake cannot read or write data, which disrupts the integration process. Using the STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID adds an additional layer of security by enforcing a trust relationship and limiting access to only the intended external system.
 
-Update the Snowflake trust policy with the details from DESC INTEGRATION
+Update the Snowflake trust policy with the details from DESC INTEGRATION on AWS.
 
 ```
 {
@@ -470,50 +446,9 @@ Update the Snowflake trust policy with the details from DESC INTEGRATION
     }
   ]
 }
-```
-
-Then run the command
-
-```
-aws iam update-assume-role-policy --role-name <your-name>-snowflake-freeagent-python --policy-document file://aws/week_2/iam-policy-snowflake-trust.json
 ```
 
 Note if you change or recreate the storage integration the `<snowflake_external_id>` will change and you will have to redo this step.
-
-If you get stuck at any point you can refer to the below. 
-<details>
-<summary>AWS Console GUI Method</summary>
-- Log in to the AWS Management Console.
-- Select IAM.
-- From the left-hand navigation pane, select Roles.
-- Select the role you created earlier
-- Select the Trust Relationships tab.
-- Select Edit trust policy.
-- Modify the policy document with the DESC STORAGE INTEGRATION output values you recorded from the Snowflake Account
-
-```
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "<snowflake_user_arn>"
-      },
-      "Action": "sts:AssumeRole",
-      "Condition": {
-        "StringEquals": {
-          "sts:ExternalId": "<snowflake_external_id>"
-        }
-      }
-    }
-  ]
-}
-```
-
-- Select Update policy to save your changes.
-</details>
 
 ### Create New External Stages
 
@@ -545,16 +480,15 @@ LIST @<your-name>_freeagent_python_stage;
 **3. Copy the files into a raw table**
 
 ```
-CREATE OR REPLACE TABLE <your-name>_freeagent_STAGING.freeagent_events_raw_python (
+CREATE OR REPLACE TABLE <your-name>_freeagent_STAGING.stg_contacts (
   json_data VARIANT
 );
 
-COPY INTO <your-name>_STAGING.freeagent_events_raw_python
-FROM @<your-name>_freeagent_python_stage
-FILE_FORMAT = (FORMAT_NAME = <your-name>_json_format);
+COPY INTO stg_contacts FROM @<your-name>_freeagent_python_stage/contacts/
+;
 
 SELECT *
-FROM <your-name>_STAGING.freeagent_events_raw_python
+FROM <your-name>_freeagent_STAGING.stg_contacts
 LIMIT 100;
 ```
 
