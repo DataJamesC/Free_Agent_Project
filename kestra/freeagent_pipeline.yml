@@ -11,7 +11,7 @@ tasks:
       - id: clone
         type: io.kestra.plugin.git.Clone
         url: "{{ vars.repo_url }}"
-        branch: dev
+        branch: main
         username: "{{ kv('GITHUB_USERNAME') }}"
         password: "{{ kv('GITHUB_TOKEN') }}"
 
