@@ -6,6 +6,7 @@
 ## Learning Objectives
 - Considerations for Extracting Data
 - Extracting with Python
+- Incremental extraction with a watermark
 - Introduction to Airbyte Cloud
 
 
@@ -195,6 +196,11 @@ FreeAgent uses standard HTTP verbs and JSON payloads across its REST endpoints:
 | `/v2/invoices` | Billing Summaries & Line Items | **Sales Revenue Fact Table** |
 | `/v2/timeslips` | Logged Work Hours | **Labor & Utilization Fact Table** |
 
+Useful query parameters for these endpoints:
+- `page` and `per_page` - results are paginated, up to 100 records per page
+- `view=all` - include all records, not just the active ones
+- `updated_since` - only return records created or updated after a timestamp, e.g. `2026-10-01T00:00:00.000Z`. This is what makes incremental extraction possible (see below)
+
 ### Make a plan
 
 Plan how you would write your Python scripts to extract the data from this API. This does not need to be perfect code, in fact it should be "pseudo" code - a plain english description of the steps you'd like to take. 
@@ -212,6 +218,8 @@ Consider the concepts discussed in Extract Fundamentals and think about how you 
 Scripts need to start by refreshing the Access Token using the endpoint: https://api.sandbox.freeagent.com/v2/token_endpoint. You can see an example of this in the population scripts we just used. 
 
 ### Example url, headers
+
+```
 url = "https://api.sandbox.freeagent.com/v2/invoices"
 headers = {
     "Authorization": f"Bearer {access_token}",
@@ -221,6 +229,7 @@ headers = {
 
 # Make the Gets
 response = requests.get(url, params=params, headers=headers)
+```
 
 
 ### Python Script
@@ -320,7 +329,171 @@ print(f"\nExtraction complete! Saved {len(all_contacts)} contacts to {output_pat
 
 </details>
 
-We want to create extract scripts for all five of our targeted endpoints (examples can be found in this repo)
+We want to create extract scripts for all five of our targeted endpoints (examples can be found in this repo: `duck_db/` saves locally like the example above, `Extract/` uploads to S3, which we'll set up in Week 2).
+
+### Incremental Extraction with a Watermark
+
+The script above is a **Full Extraction**: every run pulls every record, whether it has changed or not. That's fine for a few hundred contacts, but on a real client's account it means pulling years of invoices and timeslips every day, and loading the same records into the warehouse over and over.
+
+An **incremental** extract only asks for records that are new or have changed since the last run. To do that, the script needs to remember where it got up to. This is called a **watermark**.
+
+How it works:
+1. At the start of a run, read the watermark: the latest `updated_at` value from the last successful run.
+2. Pass it to the API as `updated_since`, so FreeAgent only returns records changed after it.
+3. Save the records to a new file. If nothing has changed, save nothing.
+4. Only once the file is saved, move the watermark to the latest `updated_at` in the records you just pulled.
+
+Things to consider:
+- **Take the watermark from the data, not the clock.** Using the latest `updated_at` in the records avoids missing anything because your laptop's clock and FreeAgent's disagree.
+- **Only move the watermark after the data is safely saved.** If the run fails half way through, the next run picks up from the same point. For the same reason, a failed API call should stop the script rather than save a partial extract.
+- **Overlap a little.** Asking for a few minutes before the watermark costs very little and guards against records updated in the same second as the last run. This means some records arrive twice, which we handle in the Transform stage.
+- **First run.** With no watermark yet, the script does a full extract. It's also useful to have a way to force a full extract (a `--full` option) and to extract from a chosen date (a `--since` option).
+- **Deletes aren't captured.** A record deleted in FreeAgent simply stops appearing. It never shows up in an incremental extract, whereas with full extracts you'd notice it's missing.
+- **Each run needs its own file.** If every run overwrote `raw_contacts.json`, the previous changes would be lost. Add the date and time to the file name.
+
+Update your scripts to extract incrementally. As before, only use the example if you're struggling.
+
+<details>
+<summary>freeagent_extract_incremental</summary>
+
+```
+# Extract new and changed Contacts from FreeAgent API v2, using a watermark
+# Docs: https://dev.freeagent.com/docs/contacts
+#
+# Usage:
+#   python extract_contacts_incremental.py                     # since the last run (full extract the first time)
+#   python extract_contacts_incremental.py --full              # ignore the watermark, extract everything
+#   python extract_contacts_incremental.py --since 2026-10-01  # extract records updated since a date
+
+import argparse
+import json
+import os
+from datetime import datetime, timedelta, timezone
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+CLIENT_ID = os.getenv("FREEAGENT_CLIENT_ID")
+CLIENT_SECRET = os.getenv("FREEAGENT_CLIENT_SECRET")
+REFRESH_TOKEN = os.getenv("FREEAGENT_REFRESH_TOKEN")
+
+# Where the watermark is saved between runs
+WATERMARK_PATH = "state/contacts.json"
+
+# Re-fetch a few minutes before the watermark to be safe
+WATERMARK_OVERLAP = timedelta(minutes=5)
+
+parser = argparse.ArgumentParser(description="Extract FreeAgent contacts")
+parser.add_argument("--full", action="store_true", help="Ignore the watermark and extract everything")
+parser.add_argument("--since", help="Extract records updated since this date/time, e.g. 2026-10-01")
+args = parser.parse_args()
+
+# Step 1: Refresh OAuth access token
+token_url = "https://api.sandbox.freeagent.com/v2/token_endpoint"
+token_response = requests.post(
+    token_url,
+    data={"grant_type": "refresh_token", "refresh_token": REFRESH_TOKEN},
+    auth=(CLIENT_ID, CLIENT_SECRET),
+    headers={"Accept": "application/json"},
+)
+
+if token_response.status_code != 200:
+    print(f"Auth Error {token_response.status_code}: {token_response.text}")
+    exit(1)
+
+access_token = token_response.json()["access_token"]
+
+# Step 2: Work out the date filter (updated_since)
+updated_since = None
+
+if args.since:
+    updated_since = datetime.fromisoformat(args.since).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+elif not args.full and os.path.exists(WATERMARK_PATH):
+    with open(WATERMARK_PATH, encoding="utf-8") as f:
+        watermark = json.load(f)["last_updated_at"]
+    # FreeAgent timestamps look like 2026-09-29T13:09:22.000Z
+    watermark_dt = datetime.fromisoformat(watermark.replace("Z", "+00:00")) - WATERMARK_OVERLAP
+    updated_since = watermark_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+# Step 3: Setup Paginated Extraction Loop
+url = "https://api.sandbox.freeagent.com/v2/contacts"
+headers = {
+    "Authorization": f"Bearer {access_token}",
+    "Accept": "application/json",
+    "User-Agent": "FreeAgentExtractor/1.0",
+}
+
+all_contacts = []
+page = 1
+per_page = 100
+
+if updated_since:
+    print(f"Starting paginated contacts extraction (updated since {updated_since})...")
+else:
+    print("Starting paginated contacts extraction (full extract)...")
+
+while True:
+    params = {
+        "view": "all",
+        "page": page,
+        "per_page": per_page,
+    }
+    if updated_since:
+        params["updated_since"] = updated_since
+
+    response = requests.get(url, params=params, headers=headers)
+
+    # Stop rather than save a partial extract, so the watermark isn't moved past missing records
+    if response.status_code != 200:
+        print(f"Error on page {page} ({response.status_code}): {response.text}")
+        exit(1)
+
+    data = response.json()
+    contacts_batch = data.get("contacts", [])
+
+    # Exit loop if no records are returned
+    if not contacts_batch:
+        break
+
+    all_contacts.extend(contacts_batch)
+    print(f"Page {page}: Fetched {len(contacts_batch)} contacts (Total: {len(all_contacts)})")
+
+    # If the returned batch is smaller than per_page, we've reached the last page
+    if len(contacts_batch) < per_page:
+        break
+
+    page += 1
+
+if not all_contacts:
+    print("\nNo new contacts since the last run, nothing saved.")
+    exit(0)
+
+# Step 4: Save the records to a new, timestamped file
+now = datetime.now(timezone.utc)
+os.makedirs("data/contacts", exist_ok=True)
+output_path = f"data/contacts/raw_contacts_{now.strftime('%Y%m%d_%H%M%S')}.json"
+
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump({"contacts": all_contacts}, f, indent=2)
+
+print(f"\nExtraction complete! Saved {len(all_contacts)} contacts to {output_path}")
+
+# Step 5: Move the watermark, only once the data is saved
+latest_updated_at = max(record["updated_at"] for record in all_contacts)
+os.makedirs("state", exist_ok=True)
+with open(WATERMARK_PATH, "w", encoding="utf-8") as f:
+    json.dump({"last_updated_at": latest_updated_at}, f)
+
+print(f"Watermark set to {latest_updated_at}")
+```
+
+</details>
+
+To check it's working, run your script twice. The second run should return few or no records. Then add a contact with the `populate_sandbox` script and run it again: only the new contact should come back.
+
+The S3 versions of these scripts in `Extract/` work the same way, but save the data to `python-import/<entity>/YYYY/MM/DD/` in S3 and keep their watermarks in S3 at `state/<entity>.json`. We'll use those from Week 2.
 
 #### Logging
 
@@ -430,9 +603,9 @@ To Do:
 - Set logs across script at key points, or where errors can occur.
 - Determine severity level for logs user the methods: info(), warning(), error() etc
 
-Verify the error section works by setting the API_KEY to nothing in the script
+Verify the error section works by setting the refresh token to nothing in the script
 ```
-api_key = ''
+REFRESH_TOKEN = ''
 ```
 
 ## Airbyte Cloud
