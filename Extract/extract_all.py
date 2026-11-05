@@ -17,7 +17,11 @@ REFRESH_TOKEN = os.getenv("FREEAGENT_REFRESH_TOKEN")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-2")
-S3_BUCKET = "jc-freeagent-storage"
+S3_BUCKET = os.getenv("AWS_BUCKET_NAME")
+
+if not S3_BUCKET:
+    print("Error: AWS_BUCKET_NAME missing from .env")
+    exit(1)
 
 s3_client = boto3.client(
     "s3",

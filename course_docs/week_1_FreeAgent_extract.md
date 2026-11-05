@@ -346,7 +346,7 @@ How it works:
 Things to consider:
 - **Take the watermark from the data, not the clock.** Using the latest `updated_at` in the records avoids missing anything because your laptop's clock and FreeAgent's disagree.
 - **Only move the watermark after the data is safely saved.** If the run fails half way through, the next run picks up from the same point. For the same reason, a failed API call should stop the script rather than save a partial extract.
-- **Overlap a little.** Asking for a few minutes before the watermark costs very little and guards against records updated in the same second as the last run. This means some records arrive twice, which we handle in the Transform stage.
+- **Overlap a little.** Asking for a few seconds before the watermark costs very little and guards against records updated in the same second as the last run. Keep it small: our sandbox data was created at around 100 records a minute, so even a few minutes of overlap re-extracts hundreds of records. This means some records arrive twice, which we handle in the Transform stage.
 - **First run.** With no watermark yet, the script does a full extract. It's also useful to have a way to force a full extract (a `--full` option) and to extract from a chosen date (a `--since` option).
 - **Deletes aren't captured.** A record deleted in FreeAgent simply stops appearing. It never shows up in an incremental extract, whereas with full extracts you'd notice it's missing.
 - **Each run needs its own file.** If every run overwrote `raw_contacts.json`, the previous changes would be lost. Add the date and time to the file name.
@@ -382,8 +382,8 @@ REFRESH_TOKEN = os.getenv("FREEAGENT_REFRESH_TOKEN")
 # Where the watermark is saved between runs
 WATERMARK_PATH = "state/contacts.json"
 
-# Re-fetch a few minutes before the watermark to be safe
-WATERMARK_OVERLAP = timedelta(minutes=5)
+# Re-fetch a few seconds before the watermark to be safe
+WATERMARK_OVERLAP = timedelta(seconds=5)
 
 parser = argparse.ArgumentParser(description="Extract FreeAgent contacts")
 parser.add_argument("--full", action="store_true", help="Ignore the watermark and extract everything")
@@ -493,7 +493,7 @@ print(f"Watermark set to {latest_updated_at}")
 
 To check it's working, run your script twice. The second run should return few or no records. Then add a contact with the `populate_sandbox` script and run it again: only the new contact should come back.
 
-The S3 versions of these scripts in `Extract/` work the same way, but save the data to `python-import/<entity>/YYYY/MM/DD/` in S3 and keep their watermarks in S3 at `state/<entity>.json`. We'll use those from Week 2.
+The S3 versions of these scripts in `Extract/` work the same way, but save the data to `python-import/<entity>/YYYY/MM/DD/` in S3 and keep their watermarks in S3 at `python-import/_state/<entity>.json`. The watermarks sit inside `python-import/` because that's the only folder the Week 2 IAM policy gives access to; always `COPY INTO` from an entity folder (e.g. `@stage/contacts/`) rather than the root of the stage, so they aren't loaded as data. We'll use those from Week 2.
 
 #### Logging
 

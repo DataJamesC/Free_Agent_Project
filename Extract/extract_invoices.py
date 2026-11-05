@@ -1,7 +1,7 @@
 # Extract ALL Invoices with Pagination from FreeAgent API v2 and stream directly to S3
 #
 # Only records updated since the last run are extracted. The latest updated_at seen is stored
-# as a watermark at s3://<bucket>/state/invoices.json and passed to the API as updated_since.
+# as a watermark at s3://<bucket>/python-import/_state/invoices.json and passed to the API as updated_since.
 #
 # Usage:
 #   python Extract/extract_invoices.py                     # incremental (full extract on first run)
@@ -28,13 +28,18 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-2")
 
-S3_BUCKET = "jc-freeagent-storage"
+S3_BUCKET = os.getenv("AWS_BUCKET_NAME")
 
-# Watermark location, kept outside python-import/ so COPY INTO never picks it up
-WATERMARK_KEY = "state/invoices.json"
+if not S3_BUCKET:
+    print("Error: AWS_BUCKET_NAME missing from .env")
+    exit(1)
 
-# Re-fetch a few minutes before the watermark to be safe; duplicates are removed in the Silver layer
-WATERMARK_OVERLAP = timedelta(minutes=5)
+# Watermark location. It sits inside python-import/ because that's the only prefix the Week 2
+# IAM policy allows, but outside python-import/invoices/ so COPY INTO never picks it up
+WATERMARK_KEY = "python-import/_state/invoices.json"
+
+# Re-fetch a few seconds before the watermark to be safe; duplicates are removed in the Silver layer
+WATERMARK_OVERLAP = timedelta(seconds=5)
 
 parser = argparse.ArgumentParser(description="Extract FreeAgent invoices to S3")
 parser.add_argument("--full", action="store_true", help="Ignore the watermark and extract everything")
@@ -70,13 +75,16 @@ updated_since = None
 if args.since:
     updated_since = datetime.fromisoformat(args.since).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 elif not args.full:
-    try:
+    # Check the watermark exists with a list request first. The IAM policy only allows listing
+    # within python-import/, so a get_object on a missing file returns AccessDenied, not NoSuchKey
+    listing = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=WATERMARK_KEY)
+    if listing.get("KeyCount", 0) > 0:
         watermark_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=WATERMARK_KEY)
         watermark = json.loads(watermark_obj["Body"].read())["last_updated_at"]
         # FreeAgent timestamps look like 2026-09-29T13:09:22.000Z
         watermark_dt = datetime.fromisoformat(watermark.replace("Z", "+00:00")) - WATERMARK_OVERLAP
         updated_since = watermark_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    except s3_client.exceptions.NoSuchKey:
+    else:
         print("No watermark found, running a full extract")
 
 # Step 3: Setup Paginated Extraction Loop

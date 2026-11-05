@@ -1,6 +1,6 @@
 # extract_all_incremental.py - Extracts only new/changed records for all 5 FreeAgent entities to S3
 #
-# A watermark (the latest updated_at seen) is stored per entity at s3://<bucket>/state/<entity>.json.
+# A watermark (the latest updated_at seen) is stored per entity at s3://<bucket>/python-import/_state/<entity>.json.
 # Each run asks FreeAgent only for records updated since that watermark.
 # If no watermark exists yet, or --full is passed, a full extract is done instead.
 #
@@ -27,7 +27,11 @@ REFRESH_TOKEN = os.getenv("FREEAGENT_REFRESH_TOKEN")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-2")
-S3_BUCKET = "jc-freeagent-storage"
+S3_BUCKET = os.getenv("AWS_BUCKET_NAME")
+
+if not S3_BUCKET:
+    print("Error: AWS_BUCKET_NAME missing from .env")
+    exit(1)
 
 s3_client = boto3.client(
     "s3",
@@ -38,8 +42,8 @@ s3_client = boto3.client(
 
 ENTITIES = ["contacts", "users", "projects", "invoices", "timeslips"]
 
-# Re-fetch a few minutes before the watermark to be safe; duplicates are removed in the Silver layer
-WATERMARK_OVERLAP = timedelta(minutes=5)
+# Re-fetch a few seconds before the watermark to be safe; duplicates are removed in the Silver layer
+WATERMARK_OVERLAP = timedelta(seconds=5)
 
 def get_access_token():
     token_url = "https://api.sandbox.freeagent.com/v2/token_endpoint"
@@ -54,14 +58,17 @@ def get_access_token():
     return res.json()["access_token"]
 
 def watermark_key(entity_name):
-    # Kept outside python-import/ so COPY INTO never picks it up
-    return f"state/{entity_name}.json"
+    # Inside python-import/ because that's the only prefix the Week 2 IAM policy allows,
+    # but outside python-import/<entity>/ so COPY INTO never picks it up
+    return f"python-import/_state/{entity_name}.json"
 
 def read_watermark(entity_name):
-    try:
-        obj = s3_client.get_object(Bucket=S3_BUCKET, Key=watermark_key(entity_name))
-    except s3_client.exceptions.NoSuchKey:
+    # Check the watermark exists with a list request first. The IAM policy only allows listing
+    # within python-import/, so a get_object on a missing file returns AccessDenied, not NoSuchKey
+    listing = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=watermark_key(entity_name))
+    if listing.get("KeyCount", 0) == 0:
         return None
+    obj = s3_client.get_object(Bucket=S3_BUCKET, Key=watermark_key(entity_name))
     return json.loads(obj["Body"].read())["last_updated_at"]
 
 def write_watermark(entity_name, last_updated_at):
