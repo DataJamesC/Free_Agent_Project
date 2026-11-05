@@ -1,5 +1,6 @@
 # Ignore environment secrets
 .env
+.env_encoded
 raw_*
 dedupe_*
 .venv

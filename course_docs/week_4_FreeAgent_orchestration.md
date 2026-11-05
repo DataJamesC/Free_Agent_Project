@@ -3,10 +3,24 @@
 
 ## Introduction
 
+So far we've run our FreeAgent extract scripts by hand from our laptops. In this session we'll hand that job to an **orchestrator**, so the pipeline runs on a schedule without anyone needing to press go.
+
+[Kestra](https://kestra.io/docs) is an open-source orchestration platform. You describe a pipeline as a **flow** in YAML, a list of tasks such as "clone the repo" then "run the extract script", and Kestra runs them in order, on a schedule or trigger, and keeps the logs, outputs and history of every run. Each task's `type:` is a **plugin**, and there are plugins for git, Python, Snowflake, dbt and hundreds of other tools.
+
+We'll run Kestra locally in **Docker**. Docker runs software in an isolated, throwaway Linux environment called a **container**, built from a downloadable **image**. When we start Kestra:
+
+- The `kestra/kestra` image runs as a container, with `server local` starting all of Kestra's components (web UI, scheduler, executor, worker and a built-in database) in one process. The UI is then available at localhost:8080.
+- Kestra is given access to Docker itself (`-v /var/run/docker.sock:...`), because it doesn't run our Python inside its own container. For each script task it starts a **fresh Python container**, passes in our cloned repo and credentials, runs the script and then deletes the container.
+
+This has a few consequences you'll see throughout the session:
+- `pip install` runs on every execution, because every run starts from a clean container.
+- Credentials have to be passed in through the flow's `env` block, as there's no `.env` file in the container.
+- Nothing saved to disk survives between runs, which is why our extract scripts keep their watermarks in S3.
+
 ## Learning Objectives
-Running tasks with Kestra
-Running code anywhere
-Debugging
+- Running tasks with Kestra
+- Running code anywhere
+- Debugging
 
 ## Set Up Kestra and GitHub Access
 
@@ -170,7 +184,7 @@ SECRET_GITHUB_TOKEN='your_token_as_base64'
 
 Update your gitignore to hide this file.
 ```
-*.env*
+.env_encoded
 ```
 
 To load the file into Kestra, add `--env-file .env_encoded` to the `docker run` command from step 1, run from the folder containing `.env_encoded`, e.g. on Windows:
@@ -257,6 +271,7 @@ tasks:
     type: io.kestra.plugin.scripts.python.Script
     beforeCommands:
       - pip install requests
+      - pip install kestra
     script: |
       from kestra import Kestra
       import requests
@@ -306,6 +321,7 @@ tasks:
         type: io.kestra.plugin.scripts.python.Script
         beforeCommands:
           - pip install -r requirements.txt
+          - pip install kestra
         script: |
           from kestra import Kestra
           import requests
