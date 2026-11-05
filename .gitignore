@@ -1,5 +1,12 @@
 # Ignore environment secrets
 .env
+.env_encoded
 raw_*
 dedupe_*
 .venv
+# Local extract watermarks
+state/
+
+# Python bytecode
+__pycache__/
+*.pyc

@@ -1,7 +1,16 @@
 # Extract ALL Users (Employee Dimension) with Pagination from FreeAgent API v2 and stream directly to S3
+#
+# Only records updated since the last run are extracted. The latest updated_at seen is stored
+# as a watermark at s3://<bucket>/python-import/_state/users.json and passed to the API as updated_since.
+#
+# Usage:
+#   python Extract/extract_users.py                     # incremental (full extract on first run)
+#   python Extract/extract_users.py --full              # ignore the watermark, extract everything
+#   python Extract/extract_users.py --since 2026-10-01  # extract records updated since a date
+import argparse
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import boto3
 import requests
 from dotenv import load_dotenv
@@ -19,7 +28,23 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-2")
 
-S3_BUCKET = "jc-freeagent-storage"
+S3_BUCKET = os.getenv("AWS_BUCKET_NAME")
+
+if not S3_BUCKET:
+    print("Error: AWS_BUCKET_NAME missing from .env")
+    exit(1)
+
+# Watermark location. It sits inside python-import/ because that's the only prefix the Week 2
+# IAM policy allows, but outside python-import/users/ so COPY INTO never picks it up
+WATERMARK_KEY = "python-import/_state/users.json"
+
+# Re-fetch a few seconds before the watermark to be safe; duplicates are removed in the Silver layer
+WATERMARK_OVERLAP = timedelta(seconds=5)
+
+parser = argparse.ArgumentParser(description="Extract FreeAgent users to S3")
+parser.add_argument("--full", action="store_true", help="Ignore the watermark and extract everything")
+parser.add_argument("--since", help="Extract records updated since this date/time, e.g. 2026-10-01")
+args = parser.parse_args()
 
 # Initialize S3 Client explicitly using environment variables
 s3_client = boto3.client(
@@ -44,7 +69,25 @@ if token_response.status_code != 200:
 
 access_token = token_response.json()["access_token"]
 
-# Step 2: Setup Paginated Extraction Loop
+# Step 2: Work out the date filter (updated_since)
+updated_since = None
+
+if args.since:
+    updated_since = datetime.fromisoformat(args.since).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+elif not args.full:
+    # Check the watermark exists with a list request first. The IAM policy only allows listing
+    # within python-import/, so a get_object on a missing file returns AccessDenied, not NoSuchKey
+    listing = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=WATERMARK_KEY)
+    if listing.get("KeyCount", 0) > 0:
+        watermark_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=WATERMARK_KEY)
+        watermark = json.loads(watermark_obj["Body"].read())["last_updated_at"]
+        # FreeAgent timestamps look like 2026-09-29T13:09:22.000Z
+        watermark_dt = datetime.fromisoformat(watermark.replace("Z", "+00:00")) - WATERMARK_OVERLAP
+        updated_since = watermark_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    else:
+        print("No watermark found, running a full extract")
+
+# Step 3: Setup Paginated Extraction Loop
 url = "https://api.sandbox.freeagent.com/v2/users"
 headers = {
     "Authorization": f"Bearer {access_token}",
@@ -56,7 +99,10 @@ all_users = []
 page = 1
 per_page = 100
 
-print("Starting paginated users extraction...")
+if updated_since:
+    print(f"Starting paginated users extraction (updated since {updated_since})...")
+else:
+    print("Starting paginated users extraction (full extract)...")
 
 while True:
     params = {
@@ -64,12 +110,15 @@ while True:
         "page": page,
         "per_page": per_page,
     }
+    if updated_since:
+        params["updated_since"] = updated_since
 
     response = requests.get(url, params=params, headers=headers)
 
+    # Stop rather than upload a partial extract, so the watermark isn't moved past missing records
     if response.status_code != 200:
         print(f"Error on page {page} ({response.status_code}): {response.text}")
-        break
+        exit(1)
 
     data = response.json()
     users_batch = data.get("users", [])
@@ -85,12 +134,17 @@ while True:
 
     page += 1
 
-# Step 3: Generate Dynamic Date-Partitioned Key (YYYY/MM/DD)
+if not all_users:
+    print("\nNo new users since the last run, nothing uploaded.")
+    exit(0)
+
+# Step 4: Generate Dynamic Date-Partitioned Key (users/YYYY/MM/DD/raw_users_HHMMSS.json)
+# The time in the file name stops a second run on the same day overwriting the first
 now = datetime.now(timezone.utc)
 date_prefix = now.strftime("%Y/%m/%d")
-s3_key = f"python-import/{date_prefix}/raw_users.json"
+s3_key = f"python-import/users/{date_prefix}/raw_users_{now.strftime('%H%M%S')}.json"
 
-# Step 4: Stream Payload Directly to AWS S3 (In-Memory)
+# Step 5: Stream Payload Directly to AWS S3 (In-Memory)
 json_payload = json.dumps({"users": all_users}, indent=2).encode("utf-8")
 
 s3_client.put_object(
@@ -101,3 +155,15 @@ s3_client.put_object(
 )
 
 print(f"\nExtraction complete! Uploaded {len(all_users)} users to s3://{S3_BUCKET}/{s3_key}")
+
+# Step 6: Move the watermark, only once the data is safely in S3.
+# Use the latest updated_at in the data, not the current time, so clock differences can't skip records.
+latest_updated_at = max(record["updated_at"] for record in all_users)
+s3_client.put_object(
+    Bucket=S3_BUCKET,
+    Key=WATERMARK_KEY,
+    Body=json.dumps({"last_updated_at": latest_updated_at}).encode("utf-8"),
+    ContentType="application/json",
+)
+
+print(f"Watermark set to {latest_updated_at}")

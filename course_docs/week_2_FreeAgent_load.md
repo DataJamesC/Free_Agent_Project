@@ -284,9 +284,9 @@ Here we import the boto3 library, configure the boto3 for AWS S3 and implement t
 In your freeagent folder, edit the .env file to include the following variables, edited with the correct keys.
 
 ```
-AWS_ACCESS_KEY = 'xxxxxxxxxxxxxxxxxx'
-AWS_SECRET_KEY = 'xxxxxxxxxxxxxxxxxx'
-AWS_REGION = 'xxxxxxxxxxxxxxxxxx'
+AWS_ACCESS_KEY_ID = 'xxxxxxxxxxxxxxxxxx'
+AWS_SECRET_ACCESS_KEY = 'xxxxxxxxxxxxxxxxxx'
+AWS_REGION = 'eu-west-2'
 AWS_BUCKET_NAME = 'bucket-name'
 ```
 
@@ -340,15 +340,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Read .env file
-aws_access_key=os.getenv('AWS_ACCESS_KEY')
-aws_secret_key=os.getenv('AWS_SECRET_KEY')
-aws_bucket_name=os.getenv('AWS_BUCKET')
+aws_access_key=os.getenv('AWS_ACCESS_KEY_ID')
+aws_secret_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+aws_region=os.getenv('AWS_REGION')
+aws_bucket_name=os.getenv('AWS_BUCKET_NAME')
 
 # Create S3 Client using AWS Credentials
 s3_client = boto3.client(
     's3',
     aws_access_key_id=aws_access_key,
-    aws_secret_access_key=aws_secret_key
+    aws_secret_access_key=aws_secret_key,
+    region_name=aws_region
 )
 
 # Set file start and end points
@@ -481,7 +483,7 @@ LIST @<your-name>_freeagent_python_stage;
 
 ```
 CREATE OR REPLACE TABLE <your-name>_freeagent_STAGING.stg_contacts (
-  json_data VARIANT
+  raw_data VARIANT
 );
 
 COPY INTO stg_contacts FROM @<your-name>_freeagent_python_stage/contacts/
@@ -491,6 +493,8 @@ SELECT *
 FROM <your-name>_freeagent_STAGING.stg_contacts
 LIMIT 100;
 ```
+
+Repeat these steps for all of our endpoints, so we have 5 staging tables in Snowflake before we move on to the transform section next.
 
 ---
 

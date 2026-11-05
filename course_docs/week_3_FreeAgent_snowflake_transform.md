@@ -1,11 +1,15 @@
 
-# Transform Project: Amplitude in Snowflake
-### Week 3 | Monday | Instructor Led Walkthrough
+# Transform Project: FreeAgent in Snowflake
+### Week 3 | Monday | Hands-on Build Session
 
 ## Introduction
 
+In Weeks 1 and 2 we extracted five endpoints from the FreeAgent API (contacts, users, projects, invoices and timeslips), landed them in S3 as JSON and copied them into five staging tables in Snowflake. That is our Bronze layer.
+
+This session is about turning that Bronze layer into a layer that analysts can actually use, and then automating it so new data flows through without anyone touching it. You've should be acquianted with all of the techniques below from previous sessions. This document is a reference, not a script: how you design your schema, which refresh strategy you pick for each table, and how you automate it is up to you. Be ready to explain your decisions.
+
 ## Learning Objectives
-- Dealing with nested arrays
+- Flattening JSON arrays into tables
 - Applying Medallion Architecture Pattern 
 - Stored Procedures
   - Insert
@@ -16,12 +20,22 @@
 - Snowpipes
 - Types of Tables and views
 
+## Before You Start
+
+You should have the following from Week 2, all in your `<your-name>_freeagent_staging` schema:
+
+- An external stage, `<your-name>_freeagent_python_stage`, pointing at `s3://<your-name>-freeagent-storage/python-import/`
+- Five staging tables, each with a single `raw_data VARIANT` column, loaded with `COPY INTO`:
+  - `stg_contacts`, `stg_users`, `stg_projects`, `stg_invoices`, `stg_timeslips`
+
+
 ## Recap of Existing Processes
 
-**Amplitude Export API** 
+**FreeAgent API**
 
-- Python script to extract and upload data to S3 Bucket as JSON
-- Snowflake Storage Integration to query raw data in Snowflake
+- Python script to extract the five endpoints and upload them to the S3 Bucket as JSON, at `python-import/<entity>/YYYY/MM/DD/raw_<entity>.json`
+- Snowflake Storage Integration and External Stage to access the files from Snowflake
+- `COPY INTO` to load each endpoint into its own staging table
 
 ## Bronze-to-Silver Medallion Pipeline aka Parsing Data into a Schema
 
@@ -99,25 +113,39 @@ Our Bronze layer consists of data stored as JSON. This will not be easy for data
 
 ```
 
-Typically, the JSON structures can be parsed into a table using these selectors:
+Each file is a single JSON object holding one array (`contacts`, `users`, `projects`, `invoices` or `timeslips`), so each row of a staging table contains every record from that file.
+
+Fields on a JSON object can be selected using this notation:
 
 ```
 SELECT 
-json_data:"account_balance"::string as "$account_balance",
-json_data:"country"::string as "country"
-FROM raw_table;
+raw_data:"field_name"::string as field_name
+FROM stg_table;
 ```
 
-And fields from nested arrays can be accessed as:
+To turn an array into one row per record, use `LATERAL FLATTEN`. Each element of the array is returned in the `value` column, and fields are selected from that:
 
 ```
 SELECT
-json_data:array_name:field_name::data_type as new_field_name
-FROM table
+c.value:organisation_name::string as organisation_name,
+c.value:country::string as country,
+c.value:account_balance::number(12,2) as account_balance
+FROM stg_contacts,
+LATERAL FLATTEN(input => raw_data:contacts) c;
 ```
 
+Things to look out for in the FreeAgent data:
 
-Before we built our silver layer, it's important to plan it. Time to build our snowflake schema while taking into account the business requirements / questions: 
+- **Relationships are URLs, not IDs.** A project's `contact` field is `https://api.sandbox.freeagent.com/v2/contacts/258818`, a timeslip's `user`, `project` and `task` fields work the same way. The number at the end of each record's own `url` is its natural ID.
+- **Numbers often arrive as strings**, e.g. `"account_balance": "0.0"`, `"total_value"`, `"hours"`. Cast them.
+- **Optional fields are missing rather than null**, e.g. the first contact above has no `email`. These come through as `NULL`.
+- **Every extract is a full snapshot.** Each time the Python script runs, it writes every record again into a new dated folder. Once more than one file per endpoint has been loaded, the same record will appear several times in Bronze. Your Silver layer needs a strategy for this, for example keeping only the latest version of each record:
+
+```
+QUALIFY ROW_NUMBER() OVER (PARTITION BY contact_id ORDER BY updated_at DESC) = 1
+```
+
+Before we build our silver layer, it's important to plan it. Time to design our star (or snowflake) schema while taking into account the some possible business requirements / questions: 
 
 - Overdue Debt & Aging: Which clients owe money, and how long has each invoice been overdue
 - Payment Reliability: Which clients consistently pay late compared to their agreed payment terms?
@@ -125,27 +153,27 @@ Before we built our silver layer, it's important to plan it. Time to build our s
 
 ## Create Tables
 
-For the tables in the schema we will need to create Unique ID fields:
+For the tables in the schema we will need Unique ID fields:
 - To act as a unique row identifier for each record in a table (primary key)
 - To be the identifiers to connect between tables in the schema (foreign keys)
 
-The functions HASH() or MD5() are standard ways of creating a unique ID fields. 
+Where there is no natural key, for example a table built from a combination of fields, you'll need to create one. The functions HASH() or MD5() are standard ways of creating unique ID fields. 
 
 ### Option 1: HASH
 
 The HASH() function will create a 64bit integer which is always assigned to the value of the field(s) you tell it to be based on, for example hashing "Belgium" leads to a HASH of -5115476029316419222. You can HASH multiple fields, hashing "Belgium" and "London" leads to a HASH of 8345500420073462720. Be careful, the order of the fields you are hashing matters. 
 
 ```
-SELECT HASH(col1, col2, col3) as event_id
+SELECT HASH(col1, col2, col3) as row_id
   , col1
   , col2
   , col3
 FROM raw_data
 ```
 
-This is easy to set up, now everytime a combination of col1, col2, and col3, is hashed you will get the same value, meaning you can use this to create both your dimensions and fact tables. 
+This is easy to set up, now every time a combination of col1, col2, and col3 is hashed you will get the same value, meaning you can use this to create both your dimensions and fact tables independently, without needing to join them to look up the key. 
 
-HASH ids are very fast performing for joins, whilst occupying a small amount of much storage, and will always recomputes to the same value, i.e. the same ID. The costs for a HASH are on the compute side.
+HASH IDs are fast to join on, occupy a small amount of storage, and will always recompute to the same value, i.e. the same ID. Collisions (two different inputs giving the same hash) are possible but extremely unlikely at this volume of data.
 
 ### Option 2: Dimension table + join
 
@@ -153,27 +181,24 @@ HASH ids are very fast performing for joins, whilst occupying a small amount of 
 -- first build a dimension table
 CREATE OR REPLACE TABLE dimensions AS
 SELECT
-  ROW_NUMBER() OVER (Order BY col1, col2, col3) as event_id
+  ROW_NUMBER() OVER (ORDER BY col1, col2, col3) as dim_id
   , col1
   , col2
   , col3
 FROM (
-  Select DISTINCT col1, col2, col3 FROM raw_data);
+  SELECT DISTINCT col1, col2, col3 FROM raw_data);
 
 -- Then build fact table
-SELECT r.*
-  , d.event_id
-  , r.col1
-  , r.col2
-  , r.col3
-from r.raw_data
-JOIN d.dimensions
+SELECT d.dim_id
+  , r.*
+FROM raw_data r
+JOIN dimensions d
 ON r.col1 = d.col1
 AND r.col2 = d.col2
 AND r.col3 = d.col3
 ```
 
-This method is more complicated and manually intensive. It requires more maintenance in the event of schema changes, i.e. new columns added. There would be a slight improvement in join performance over hash due to a smaller ID range created by ROW_NUMBER(). 
+This method is more complicated and manually intensive. It requires more maintenance in the event of schema changes, i.e. new columns added. The IDs are small sequential integers, but they are not stable: when new values arrive, ROW_NUMBER() can assign different IDs on the next rebuild, so any fact table using them has to be rebuilt at the same time.
 
 
 ### To Do
@@ -189,7 +214,7 @@ Overview: https://docs.snowflake.com/en/developer-guide/stored-procedure/stored-
 
 Stored procedures are scripts saved in the database that you can call to perform common actions or transformations on data contained in your database. With a procedure, you can use branching, looping, and other programmatic constructs. You can reuse a procedure multiple times by calling it from other code.
 
-A Snowflake stored procedure code is wrapped in a function taking the snowpark_session and any arguments you have given as options. The snowpark_session will give you access to execute SQL queries through Python.
+Procedures can be written in SQL (Snowflake Scripting), Python and other languages. The examples in this section use SQL; there is an introduction to Python procedures in the stretch section at the end.
 
 
 ### Example: Rebuild the Contacts Table
@@ -201,24 +226,33 @@ The Stored Procedure below will rebuild a table containing details about Contact
   
 ```
 -- Creating a Procedure : 
-CREATE OR REPLACE PROCEDURE REFRESH_CONTACTS()
+CREATE OR REPLACE PROCEDURE REFRESH_DIM_CONTACTS()
 returns varchar
 language sql
 as
 $$
-CREATE OR REPLACE TABLE FREEAGENT_ANALYTICS.DIM_CONTACTS   AS
-SELECT
-    CAST(REGEXP_SUBSTR(c.value:url::STRING, '/contacts/([0-9]+)$', 1, 1, 'e') AS INT) AS contact_id,
-    c.value:organisation_name::STRING AS organisation_name,
-    c.value:first_name::STRING AS first_name,
-    c.value:last_name::STRING AS last_name,
-FROM stg_contacts,
-LATERAL FLATTEN(input => raw_data:contacts) c;
+BEGIN
+    CREATE OR REPLACE TABLE DIM_CONTACTS AS
+    SELECT
+        CAST(REGEXP_SUBSTR(c.value:url::STRING, '/contacts/([0-9]+)$', 1, 1, 'e') AS INT) AS contact_id,
+        c.value:organisation_name::STRING AS organisation_name,
+        c.value:first_name::STRING AS first_name,
+        c.value:last_name::STRING AS last_name,
+        c.value:email::STRING AS email,
+        c.value:status::STRING AS status,
+        c.value:updated_at::TIMESTAMP_TZ AS updated_at
+    FROM stg_contacts,
+    LATERAL FLATTEN(input => raw_data:contacts) c
+    -- keep only the latest version of each contact across snapshots
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY contact_id ORDER BY updated_at DESC) = 1;
+
+    RETURN 'DIM_CONTACTS rebuilt';
+END;
 $$
 ;
 
 --Run procedure
-CALL REFRESH_CONTACTS();
+CALL REFRESH_DIM_CONTACTS();
 ```
 </details>
 
@@ -227,9 +261,9 @@ CALL REFRESH_CONTACTS();
 
 Overview: https://docs.snowflake.com/en/sql-reference/sql/insert
 
-For larger tables, rebuilding the entire table will be very computationally expensive. Insert here can be used to add only the new data in determined by the WHERE clause. This works well in situations where only new rows are added, i.e. tracking internet speed readings, less effective where values may need to be updated, i.e. an order is returned.
+For larger tables, rebuilding the entire table will be very computationally expensive. Insert can be used to add only the new data, as determined by the WHERE clause. This works well in situations where only new rows are added, i.e. tracking internet speed readings, and is less effective where values may need to be updated, i.e. an invoice moving from Draft to Paid.
 
-Insert Into can also be a more efficient version of fully refreshing a table if using the Overwrite parameter. This is the equivalent of truncating the table and inserting data back in. This is supported by Snowflake, Databricks and Bigquery (different syntax), but not by SQLServer, MySQL or Oracle. 
+Insert can also be a more efficient version of fully refreshing a table if using the OVERWRITE parameter (`INSERT OVERWRITE INTO`). This is the equivalent of truncating the table and inserting data back in, but keeps the table itself (and any grants or streams on it). This is supported by Snowflake, Databricks and BigQuery (different syntax), but not by SQL Server, MySQL or Oracle. 
 
 
 ### Merge Statements
@@ -245,15 +279,17 @@ MERGE INTO <target_table>
   { matching / not matching criteria }
 ```
 
-This is very heavy to compute as it has to process every single row of the data. 
-
-Remember this compute power instensive and should be reserved for cases of a small amount of rows that need updating regularly.  
+MERGE is the standard pattern when existing rows can change, but it has to join every incoming row against the target table, so the cost grows with the size of both. Keep the source as small as possible, for example only the new data from a stream, rather than merging the full history every time.
 
 ## Scheduling Stored Procedures
 
-**Tasks** allow you to automate data processing. They can run at scheduled times or be triggered by events, such as when new dat arrives in a stream. 
+**Tasks** allow you to automate data processing. They can run at scheduled times or be triggered by events, such as when new data arrives in a stream. 
 
 A **Stream** is an object that records changes made to tables, this includes inserts, updates and deletes. Once those actions are recorded you can use the stream as a change data capture process to trigger queries and procedures. The inserted or updated rows will be stored in the stream.  
+
+Two things to know about streams:
+- A stream only empties (its offset moves forward) when it is read by a DML statement, e.g. an `INSERT` or `MERGE` that selects from it. Simply querying it with `SELECT` does not empty it.
+- Replacing the source table with `CREATE OR REPLACE TABLE` breaks the stream. `COPY INTO` and Snowpipe append to the table, so they are fine.
 
 ### Example: Procedures, Tasks and Streams
 
@@ -266,17 +302,11 @@ In this example we will:
     <summary>Stored Procedure, triggered by Task following a Stream update</summary>
 
 ```
-CREATE OR REPLACE TABLE S_AMPLITUDE_COUNTRY AS 
-SELECT DISTINCT
-    "country" as country_name,
-    hash("country") as country_id
-FROM EVENTS_TABLE;
-
 -- Empty the table so we can see if there's an update later
-TRUNCATE TABLE S_AMPLITUDE_COUNTRY;
+TRUNCATE TABLE DIM_CONTACTS;
 
--- Create a Stream 
-CREATE OR REPLACE STREAM AMPLITUDE_RAW ON TABLE EVENTS_TABLE;
+-- Create a Stream on the bronze table
+CREATE OR REPLACE STREAM STG_CONTACTS_STREAM ON TABLE STG_CONTACTS;
 
 -- The Stream is currently empty 
 SELECT 
@@ -284,125 +314,156 @@ SELECT
     metadata$isupdate,
     metadata$row_id,
     *
-FROM AMPLITUDE_RAW;
+FROM STG_CONTACTS_STREAM;
 
--- Modifying our Country Procedure: 
-CREATE OR REPLACE PROCEDURE REFRESH_S_AMPLITUDE_COUNTRY() 
+-- A procedure that merges only the new rows from the stream into the dimension
+CREATE OR REPLACE PROCEDURE MERGE_DIM_CONTACTS() 
 returns varchar
 language sql
 as
 $$
 BEGIN 
+    MERGE INTO DIM_CONTACTS d
+    USING (
+        SELECT
+            CAST(REGEXP_SUBSTR(c.value:url::STRING, '/contacts/([0-9]+)$', 1, 1, 'e') AS INT) AS contact_id,
+            c.value:organisation_name::STRING AS organisation_name,
+            c.value:first_name::STRING AS first_name,
+            c.value:last_name::STRING AS last_name,
+            c.value:email::STRING AS email,
+            c.value:status::STRING AS status,
+            c.value:updated_at::TIMESTAMP_TZ AS updated_at
+        FROM STG_CONTACTS_STREAM s, -- Stream Name
+        LATERAL FLATTEN(input => s.raw_data:contacts) c
+        WHERE s.metadata$action = 'INSERT'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY contact_id ORDER BY updated_at DESC) = 1
+    ) src
+    ON d.contact_id = src.contact_id
+    WHEN MATCHED AND src.updated_at > d.updated_at THEN UPDATE SET
+        organisation_name = src.organisation_name,
+        first_name = src.first_name,
+        last_name = src.last_name,
+        email = src.email,
+        status = src.status,
+        updated_at = src.updated_at
+    WHEN NOT MATCHED THEN INSERT
+        (contact_id, organisation_name, first_name, last_name, email, status, updated_at)
+        VALUES (src.contact_id, src.organisation_name, src.first_name, src.last_name, src.email, src.status, src.updated_at);
 
-INSERT INTO S_AMPLITUDE_COUNTRY
-SELECT DISTINCT
-"country" as country_name,
-hash("country") as country_id
-FROM AMPLITUDE_RAW; -- Stream Name
-END
+    RETURN 'DIM_CONTACTS merged';
+END;
 $$;
 
--- Inserting 2 rows via duplication
-INSERT INTO EVENTS_TABLE ( 
-SELECT * FROM AMPLITUDE_EVENTS_RAW
-LIMIT 2);
+-- Simulate a new file arriving by duplicating a row of the bronze table
+INSERT INTO STG_CONTACTS 
+SELECT * FROM STG_CONTACTS
+LIMIT 1;
 
--- Now there's 2 rows row in the Stream for the inserted data
+-- Now there's 1 row in the Stream for the inserted data
 SELECT 
     metadata$action,
     metadata$isupdate,
     metadata$row_id,
     *
-FROM AMPLITUDE_RAW;
+FROM STG_CONTACTS_STREAM;
 
 -- Create a task triggered by the stream
-CREATE OR REPLACE TASK TRIGGER_S_AMPLITUDE_EVENTS_REFRESH
+CREATE OR REPLACE TASK MERGE_DIM_CONTACTS_TASK
 WAREHOUSE = DATASCHOOL_WH
 SCHEDULE = '1 MINUTE' --this means every 1min, the task will check if the stream has data. 
-WHEN SYSTEM$STREAM_HAS_DATA('AMPLITUDE_RAW')
+WHEN SYSTEM$STREAM_HAS_DATA('STG_CONTACTS_STREAM')
 as
-CALL REFRESH_S_AMPLITUDE_COUNTRY();
+CALL MERGE_DIM_CONTACTS();
 
--- Now set the task as resume to start checking the stage
-ALTER TASK TRIGGER_S_AMPLITUDE_EVENTS_REFRESH RESUME;
+-- Now resume the task so it starts checking the stream
+ALTER TASK MERGE_DIM_CONTACTS_TASK RESUME;
 
 --Check task has run
 SELECT * 
-FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY());
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+WHERE NAME = 'MERGE_DIM_CONTACTS_TASK'
+ORDER BY SCHEDULED_TIME DESC;
 
 -- Check the data has arrived
 SELECT * 
-FROM S_AMPLITUDE_COUNTRY;
+FROM DIM_CONTACTS;
 
--- After the data has been processed it will be removed from the stage
+-- After the data has been processed it will be removed from the stream
 SELECT 
     metadata$action,
     metadata$isupdate,
     metadata$row_id,
     *
-FROM AMPLITUDE_RAW;
+FROM STG_CONTACTS_STREAM;
 
 -- Stop Task 
-ALTER TASK TRIGGER_S_AMPLITUDE_EVENTS_REFRESH SUSPEND;
+ALTER TASK MERGE_DIM_CONTACTS_TASK SUSPEND;
 
 --Check no more tasks are scheduled to run
 SELECT * 
-FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY());
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+WHERE NAME = 'MERGE_DIM_CONTACTS_TASK'
+ORDER BY SCHEDULED_TIME DESC;
 ```
 </details>
 
-By default, tasks created are set as suspended. The task created above will check for new data every minute, you will see them skip the procedure as SYSTEM$STREAM_HAS_DATA will evaluate to FALSE. 
+By default, tasks are created as suspended. The task created above will check for new data every minute, you will see it skip the procedure while SYSTEM$STREAM_HAS_DATA evaluates to FALSE (skipped runs don't use the warehouse). 
 
-The stream will look for data every minute, if you know your data isn't loaded on a frequent basis a task can be scheduled using cron.
-
-Schedule a tasks to run a procedure daily
+The task will check the stream every minute; if you know your data isn't loaded on a frequent basis, a task can be scheduled using cron instead.
 
 
 <details>
-    <summary>Schedule a tasks to run a procedure daily</summary>
+    <summary>Schedule a task to run a procedure daily</summary>
 
 ```
--- Daily Task for country 
-CREATE TASK DAILY_S_AMPLITUDE_COUNTRY
-WAREHOUSE = dataschool_wh
+-- Daily Task for contacts
+CREATE OR REPLACE TASK DAILY_DIM_CONTACTS
+WAREHOUSE = DATASCHOOL_WH
   SCHEDULE='USING CRON 0 8 * * * Europe/London'
 AS
-CALL REFRESH_S_AMPLITUDE_COUNTRY();
+CALL REFRESH_DIM_CONTACTS();
 
 -- Start Task
-ALTER TASK DAILY_S_AMPLITUDE_COUNTRY RESUME;
+ALTER TASK DAILY_DIM_CONTACTS RESUME;
 
 --Check task
 SELECT * 
-FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY());
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+WHERE NAME = 'DAILY_DIM_CONTACTS';
 
 -- Stop Task 
-ALTER TASK DAILY_S_AMPLITUDE_COUNTRY SUSPEND;
+ALTER TASK DAILY_DIM_CONTACTS SUSPEND;
 ```
 
 </details>
 
-Tasks can be chained together, so when one task completes the next will be triggered. 
+Tasks can be chained together, so when one task completes the next will be triggered. The root task must be suspended while you add child tasks, and child tasks must be resumed before the root task (or use `SYSTEM$TASK_DEPENDENTS_ENABLE` to resume them all at once).
 
 <details>
-    <summary> Chaining of tasks task </summary>
+    <summary>Chaining tasks</summary>
 
 ```
-CREATE OR REPLACE TASK DAILY_G_AMPLITUDE
-WAREHOUSE = dataschool_wh
-  AFTER DAILY_S_AMPLITUDE_COUNTRY
-AS
-SELECT * FROM S_AMPLITUDE_COUNTRY; 
+-- Suspend the root task before adding a child to it
+ALTER TASK DAILY_DIM_CONTACTS SUSPEND;
 
--- Start Task
-ALTER TASK DAILY_G_AMPLITUDE RESUME;
+-- Runs after DAILY_DIM_CONTACTS completes. REFRESH_DIM_PROJECTS is a procedure you've built for another table
+CREATE OR REPLACE TASK DAILY_DIM_PROJECTS
+WAREHOUSE = DATASCHOOL_WH
+  AFTER DAILY_DIM_CONTACTS
+AS
+CALL REFRESH_DIM_PROJECTS();
+
+-- Resume the root task and all of its children
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DAILY_DIM_CONTACTS');
 
 --Check task
 SELECT * 
-FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY());
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+WHERE NAME IN ('DAILY_DIM_CONTACTS', 'DAILY_DIM_PROJECTS');
 
--- Stop Task 
-ALTER TASK DAILY_G_AMPLITUDE SUSPEND;
+-- Stop Tasks (suspend the root first)
+ALTER TASK DAILY_DIM_CONTACTS SUSPEND;
+ALTER TASK DAILY_DIM_PROJECTS SUSPEND;
 ```
 </details>
 
@@ -419,100 +480,27 @@ Snowpipes can load data in two ways:
 
 Event‑driven auto‑ingest is typically more efficient than frequent polling, because it charges only for file ingestion operations rather than stage checks.
 
-### Example: Build a Snowpipe for the Bronze Layer
+Each pipe runs one `COPY INTO` statement for one table, so you'll need a pipe per staging table.
 
-<details>
-    <summary> Solution to creating a snowpipe from your stage</summary>
-
-```
-CREATE OR REPLACE PIPE <your-name>-amplitude_snowpipe
-auto_ingest = TRUE
-as 
-COPY INTO AMPLITUDE_EVENTS
-FROM @TIL_DATA_ENGINEERING.<your-schema>.AMPLITUDE_AIRBYTE_ST/events/
-FILE_FORMAT = TIL_DATA_ENGINEERING.<your-schema>.<your-name>_JSON_FORMAT
-MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
-ON_ERROR = 'CONTINUE';
-
--- Set your Snowpipe to look for new files
-ALTER PIPE <your-name>-amplitude_snowpipe REFRESH; 
-
--- Check your pipe status
-SELECT SYSTEM$PIPE_STATUS('<your-name>-amplitude_snowpipe') AS pipe_status;
-
--- Check your pipe's upload history
-SELECT *
-FROM INFORMATION_SCHEMA.PIPE_USAGE_HISTORY
-WHERE PIPE_NAME = '<your-name>-amplitude_snowpipe';
-```
-</details>
-
-### Event‑driven Snowpipe with AWS S3 (Auto‑ingest)
-
-Overview: https://docs.snowflake.com/en/user-guide/data-load-snowpipe-auto-s3
-
-To enable Snowflake to automatically load data as soon as files appear in your S3 bucket, use the **auto_ingest** option. This feature uses Amazon SQS notifications to trigger Snowpipe.
-
-
-Create a pipe with `AUTO_INGEST = TRUE`
-```
-CREATE OR REPLACE PIPE <your-name>_amplitude_snowpipe_sqs
-AUTO_INGEST = TRUE
-as 
-COPY INTO AMPLITUDE_EVENTS
-FROM @TIL_DATA_ENGINEERING.<your-schema>.AMPLITUDE_AIRBYTE_ST/events/
-FILE_FORMAT = TIL_DATA_ENGINEERING.<your-schema>.<your-name>_JSON_FORMAT
-MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
-ON_ERROR = 'CONTINUE';
-```
-
-Configure event notifications for your S3 bucket to notify Snowpipe when new data is available to load. The auto-ingest feature relies on Amazon SQS queues to deliver event notifications from S3 to Snowpipe.
-
-Amazon SQS (Simple Queue Service) is a managed message queuing service from AWS that enables you to decouple and communicate between different parts of your application.
-
-For ease of use, Snowpipe SQS queues are created and managed by Snowflake. The SHOW PIPES command output displays the Amazon Resource Name (ARN) of your SQS queue, in the column notification_channel.
-
-```
-SHOW PIPES;
-```
-In the output, locate the `NOTIFICATION_CHANNEL` field—this contains the SQS ARN created by Snowflake.
-
-### Log in to the Amazon S3 console.
-
-In the AWS S3 console (or using Terraform/CLI), create an event notification for your S3 bucket.
-
-Choose Your Bucket > Properties > Event Notifications > Create a New Event Notification
-
-- Name: Name of the event notification (e.g. Ingest Snowflake).
-- Events: Select the ObjectCreate (All) option.
-- Destination: Select the SQS Queue from the dropdown list.
-- SQS queue ARN: Paste the SQS queue name from the Snowflake SHOW PIPES output.
-- Event types: All object create events
-
-Snowpipe with SQS ingest is now configured.
-
-Load more files to AWS S3 and verify it has worked by. 
-
-A simple count before and after loading files will verify new files have been added.
-
-```
-SELECT COUNT(*) FROM amplitude_events_raw_python;
-```
-
-Check the status of your pipe and look for updated values in `lastReceivedMessageTimestamp`
-```
-SELECT SYSTEM$PIPE_STATUS('<your-name>_amplitude_snowpipe_sqs');
-```
+Note: Snowpipe keeps its own record of loaded files, separate from manual `COPY INTO`, so a pipe may load files you already copied in Week 2. Your snapshot handling in Silver should cope with this.
 
 ## Dynamic Tables
 
 Overview: https://docs.snowflake.com/en/user-guide/dynamic-tables-about
 
-Dynamic Tables are intended to be as performant as a querying a table, whilst being as up to date as a view. 
+Dynamic Tables are intended to be as performant as querying a table, whilst being as up to date as a view. 
 
-The Dynamic Table will refresh when the base tables are refreshed. Usually, the table data freshness won’t be more than that far behind the base table data freshness. With target lag, you control how often the table refreshes and how up-to-date the data stays. 
+Instead of writing a procedure, stream and task, you write the SELECT statement for the table you want and Snowflake keeps it up to date as the base tables change. With target lag, you control how far behind the base tables the dynamic table is allowed to fall, and therefore how often it refreshes.
 
-<img src="images/snowflake_dynamic_tables.png">
+Dynamic tables can be built on top of other dynamic tables. Use `TARGET_LAG = DOWNSTREAM` on the intermediate ones so they only refresh when a table that depends on them needs to.
+
+A quick comparison of the options:
+
+| | Kept up to date by | Query speed | Good for |
+|---|---|---|---|
+| Table | You (procedure, task, stream) | Fast | Full control over when and how data changes |
+| View | Nothing, runs the query every time | As slow as the query | Light logic, always current |
+| Dynamic Table | Snowflake, within the target lag | Fast | Declarative pipelines without managing tasks |
 
 
 ## Got this far with time to spare?
@@ -520,401 +508,37 @@ The Dynamic Table will refresh when the base tables are refreshed. Usually, the 
 <details>
     <summary>Let's teach you Dynamic SQL...</summary>
 
-Earlier we parsed our json data using the notation. 
-
-```
-SELECT 
-json_data:"$insert_id"::string as "$insert_id",
-json_data:"$insert_key"::string as "$insert_key",
-json_data:event_properties
-FROM amplitude_events_raw;
-```
-
-However, this is a very manual process, and being engineers we should make the machine do the boring working. 
-
-We can use Snowflake to write the SQL scripts for use to execute. This is called "Dynamic SQL".
-
-Effectively it will print the SQL query you need to create the tables for your Amplitude data source, in the form:
+Earlier we parsed our json data by writing out every field by hand. 
 
 ```
 SELECT
-json_data: + " column_name " + :: + data_type as " column_name ",
-json_data: + " column_name " + :: + data_type as " column_name ",
-json_data: + " column_name " + :: + data_type as " column_name ",
+c.value:organisation_name::string as organisation_name,
+c.value:country::string as country,
+c.value:account_balance::string as account_balance
+FROM stg_contacts,
+LATERAL FLATTEN(input => raw_data:contacts) c;
+```
+
+However, this is a very manual process, FreeAgent records have anywhere between 9 and 26 fields, and being engineers we should make the machine do the boring work. 
+
+We can use Snowflake to write the SQL scripts for us to execute. This is called "Dynamic SQL".
+
+Effectively it will print the SQL query you need to create the tables for your FreeAgent data source, in the form:
+
+```
+SELECT
+c.value: + " column_name " + :: + data_type as " column_name ",
+c.value: + " column_name " + :: + data_type as " column_name ",
+c.value: + " column_name " + :: + data_type as " column_name ",
 ...
-FROM raw_table
+FROM raw_table, LATERAL FLATTEN(...) c
 ```
 
-<details>
-    <summary>Dynamic SQL Stored Procedure</summary>
+### Snowflake Python Stored Procedures
 
-```
-CREATE OR REPLACE PROCEDURE GENERATE_FLATTENED_JSON(SOURCE_TABLE_NAME VARCHAR, NESTED_JSON_PATH VARCHAR, DESTINATION_TABLE_NAME VARCHAR)
-RETURNS VARCHAR
-LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
-PACKAGES = ('snowflake-snowpark-python')
-HANDLER = 'generate_flattened_json_sql_python'
-AS
-$$
-import snowflake.snowpark as snowpark
-from snowflake.snowpark.types import Variant, StringType, IntegerType, BooleanType, FloatType
-from snowflake.snowpark.functions import col, object_construct, table_function, lit
+To run the SQL that Snowflake writes for us, we'll use a Python stored procedure.
 
-def generate_flattened_json_sql_python(
-    session: snowpark.Session,
-    source_table_name: str,
-    nested_json_path: str,
-    destination_table_name: str
-) -> str:
-    """
-    Dynamically generates and executes SQL to flatten JSON data from a source table
-    into a new destination table in Snowflake using Snowpark.
-
-    Args:
-        session (snowpark.Session): The Snowpark session object.
-        source_table_name (str): The fully qualified name of the source table
-                                 (e.g., 'DATABASE.SCHEMA.TABLE').
-        nested_json_path (str): The dot-separated path to the nested JSON object
-                                 to flatten (e.g., 'event_properties', 'user_properties').
-                                 Use an empty string or None to flatten the top-level 'json_data'.
-        destination_table_name (str): The name of the table to create or replace
-                                      with the flattened data.
-
-    Returns:
-        str: A message indicating the success or failure of the operation,
-             including the generated SQL.
-    """
-    sql_query_get_columns = ""
-    json_input_path_sql = ""
-    create_table_select_cols = []
-    create_table_sql = ""
-    where_clause = ""
-
-    try:
-        # 1. Determine the base JSON path for flattening
-        # If NESTED_JSON_PATH is null or empty, target the top-level json_data.
-        # Otherwise, target the specific nested path within json_data.
-        if nested_json_path is None or nested_json_path == '':
-            json_input_path_sql = "json_data"
-            where_clause = "" # No specific WHERE clause for top-level flattening
-        else:
-            json_input_path_sql = f"json_data:{nested_json_path}"
-            # For nested tables, add event_id and session_id to link back to the main events.
-            create_table_select_cols.append("json_data:event_id::INT AS event_id")
-            create_table_select_cols.append("json_data:session_id::INT AS session_id")
-            # Add a WHERE clause to filter out rows where the nested JSON object is null or empty.
-            where_clause = f"WHERE {json_input_path_sql} IS NOT NULL AND {json_input_path_sql} <> PARSE_JSON('{{}}')"
-
-        # 2. Construct the SQL query to fetch distinct column names and their data types
-        # from the specified JSON path using Snowpark DataFrame operations.
-        # This approach leverages the Snowflake `FLATTEN` table function and `TYPEOF` SQL function.
-        # It then groups by key and aggregates types to identify mixed types or non-scalar types.
-        sql_query_get_columns = f"""
-            SELECT
-                f.key as column_name,
-                LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
-            FROM {source_table_name} t,
-            LATERAL FLATTEN(input => t.{json_input_path_sql}) f
-            GROUP BY f.key
-            HAVING (data_type NOT IN ('OBJECT','ARRAY') AND data_type NOT LIKE '%,%');
-        """
-
-        # Execute the query to get the metadata for the columns.
-        column_metadata_df = session.sql(sql_query_get_columns).collect()
-
-        # 3. Iterate through the results to build the SELECT column list for the new table.
-        if not column_metadata_df:
-            return "No flattenable columns found for the given JSON path, or the path does not exist/contains only objects/arrays."
-
-        for row in column_metadata_df:
-            col_name = row["COLUMN_NAME"]
-            data_type = row["DATA_TYPE"]
-
-            # Determine the prefix for accessing the JSON key.
-            # For top-level, it's just 'json_data', for nested it's 'json_data:nested_path'.
-            projection_prefix = "json_data" if nested_json_path is None or nested_json_path == '' else f"json_data:{nested_json_path}"
-
-            # Escape column names that might be Snowflake reserved keywords or contain special characters
-            # to ensure they are valid SQL identifiers in the alias.
-            escaped_col_name = f'"{col_name}"'
-
-            # Add the column projection string (e.g., json_data:"key"::VARCHAR AS "key") to the list.
-            # We use `session.sql` and string concatenation for the dynamic SQL, similar to JS SP.
-            create_table_select_cols.append(f'{projection_prefix}:"{col_name}"::{data_type} AS {escaped_col_name}')
-
-        # Define the separator for joining column select statements outside the f-string
-        column_list_separator = ',\n            '
-
-        # 4. Construct the final CREATE OR REPLACE TABLE statement.
-        create_table_sql = f"""
-CREATE OR REPLACE TABLE {destination_table_name} AS
-SELECT
-            {column_list_separator.join(create_table_select_cols)}
-FROM {source_table_name}
-{where_clause};
-        """
-
-        # 5. Execute the generated SQL to create the new flattened table.
-        session.sql(create_table_sql).collect()
-
-        # Return a success message including the executed SQL for verification.
-        return f"{create_table_sql}"
-
-    except Exception as e:
-        # Catch any errors during the procedure execution and return an error message.
-        return f"Failed to execute procedure: {e}\nSQL tried: {sql_query_get_columns}\nFinal SQL attempted: {create_table_sql}"
-$$;
-```
-</details>
-
----
-<details>
-    <summary>Workings of how I built the Dynamic SQL Stored Procedure, you don't need to understand this it's just if you're interested</summary>
-
-Using Snowflake, we can find all the top-level keys from this table.
-
-```
-SELECT DISTINCT 
-    f.VALUE AS top_key
-FROM amplitude_events_raw as t,
-  LATERAL FLATTEN(
-    INPUT => OBJECT_KEYS(t.json_data)  
-  ) f
-ORDER BY f.VALUE;
-```
-
-
-We can then have SQL dynamically write these columns as a SQL script for us to execute.
-
-```
-WITH CTE as (
-    SELECT DISTINCT 
-        f.VALUE AS top_key
-    FROM amplitude_events_raw as t,
-      LATERAL FLATTEN(
-        INPUT => OBJECT_KEYS(t.json_data)  -- returns ARRAY of top-level keys
-      ) f
-)
-
-SELECT 
-  'SELECT json_data:' || LISTAGG(DISTINCT '"' ||  top_key || '"', ',\njson_data:') || 
-  ' FROM amplitude_events_raw;' AS generated_sql
-FROM CTE;
-```
-
-Run the SQL generated by this query, you'll notice there are some nested arrays, e.g. user_properties. 
-
-For our schema, we'd like to separate these nested arrays into their own tables. 
-
-**How do we identify what's a nested array?**
-
-The `TYPEOF()` function will determine OBJECTS as arrays, which we can find. 
-
-```
--- Determine data types for top keys
-WITH CTE as (
-    SELECT DISTINCT 
-        f.key AS top_key,
-        TYPEOF(f.VALUE) as data_type
-        FROM amplitude_events_raw as t,
-        LATERAL FLATTEN(input => t.json_data) f
-)
-
-SELECT *
-FROM CTE;
-```
-We can ensure we have consistent data types in our tables with `LISTAGG(DISTINCT TYPEOF(f.VALUE),', ')` to comma separate any multi data types columns.
-
-To remove any nested json arrays we filter out `OBJECT`, `ARRAY` and anything LIKE `%,%`.
-
-As we are constructing a SELECT statement, we will want to include the data types in the form, `NULL_VALUE` is not a valid data type so we will convert these to `VARCHAR`
-
-```
-SELECT
-json_data: + " column_name " + :: + data_type as " column_name ",
-json_data: + " column_name " + :: + data_type as " column_name ",
-json_data: + " column_name " + :: + data_type as " column_name ",
-...
-FROM raw_table
-```
-
-This query will return a 2 columns with the column_names and the data types.
-
-```
-SELECT 
-    f.key as column_name,
-    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
-  FROM amplitude_events_raw t,
-  LATERAL FLATTEN(input => t.json_data) f
-  GROUP BY f.key
-)
-SELECT 
-*
-FROM EVENT_COLUMNS
-WHERE (data_type NOT IN ('OBJECT','ARRAY')
-AND data_type NOT LIKE '%,%');
-```
-
-Now we will need to construct a CREATE TABLE statement SELECTing from our raw table, combining all of these columns into one cell with LISTAGG()
-
-```
-WITH EVENT_COLUMNS as (
-SELECT 
-    f.key as column_name,
-    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
-  FROM amplitude_events_raw t,
-  LATERAL FLATTEN(input => t.json_data) f
-  GROUP BY f.key
-)
-SELECT 
-'CREATE OR REPLACE TABLE events AS  \n' ||
-'SELECT \n' ||
-LISTAGG(DISTINCT 'json_data:"' ||column_name || '"::' || data_type || ' as "' ||column_name || '"', ',\n') ||
-'\nFROM amplitude_events_raw;' as generated_sql
-FROM EVENT_COLUMNS
-WHERE (data_type NOT IN ('OBJECT','ARRAY')
-AND data_type NOT LIKE '%,%')
-```
-
-We can also use a similar query to extract data from the nested objects by changing out `LATERAL FLATTEN()`
-
-```
--- Extract user properties
-WITH EVENT_COLUMNS as (
-SELECT 
-    f.key as column_name,
-    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
-  FROM amplitude_events_raw t,
-  LATERAL FLATTEN(input => t.json_data:user_properties) f
-  GROUP BY f.key
-)
-SELECT 
-'CREATE OR REPLACE TABLE user_properties AS  \n' ||
-'SELECT \n' ||
-'json_data:event_id::INTEGER AS event_id, \n' ||
-'json_data:session_id::INTEGER AS session_id, \n' ||
-LISTAGG(DISTINCT 'json_data:user_properties."' ||column_name || '"::' || data_type || ' as "' ||column_name || '"', ',\n') ||
-'\nFROM amplitude_events_raw
-WHERE json_data:user_properties <> ''{}'';' as generated_sql
-FROM EVENT_COLUMNS
-WHERE (data_type NOT IN ('OBJECT','ARRAY')
-AND data_type NOT LIKE '%,%');
-```
-
-What's changed:
-- In the CTE `LATERAL FLATTEN(input => t.json_data:user_properties)`
-- Columns now are called with `'json_data:user_properties."' instead of just 'json_data:'`
-- We are filtering empty json out `WHERE json_data:user_properties <> ''{}''`
-- And changed our table name `CREATE OR REPLACE TABLE user_properties AS`
-- Add references so we can join back to the events table
-
-```
-json_data:event_id::INTEGER AS event_id, \n' ||
-'json_data:session_id::INTEGER AS session_id, \n' ||
-```
-These will act as a composite foreign key
-
-##### Logic for Table paths
-
-In the procedure below we pass the table name as an argument, this can come in many forms:
-- table_name
-- schema.table_name
-- database.schema.table_name
-
-What the logic below does is identify which version of table name we have and then added the current path if a schema or database is not speficied, returning `fully_qualified_table` which is the full path.
-
-```
-parts = TABLE_NAME.split('.')
-    if len(parts) == 1:  # Just table name provided
-        current_db = snowpark_session.sql("SELECT CURRENT_DATABASE() AS DB").collect()[0]['DB']
-        current_schema = snowpark_session.sql("SELECT CURRENT_SCHEMA() AS SCHEMA").collect()[0]['SCHEMA']
-        fully_qualified_table = f"{current_db}.{current_schema}.{TABLE_NAME}"
-    elif len(parts) == 2:  # Schema.table provided
-        current_db = snowpark_session.sql("SELECT CURRENT_DATABASE() AS DB").collect()[0]['DB']
-        fully_qualified_table = f"{current_db}.{TABLE_NAME}"
-    else:  # Fully qualified name provided
-        fully_qualified_table = TABLE_NAME
-```
-
-Create a stored procedure for events table.
-
-```
-CREATE OR REPLACE PROCEDURE UPDATE_EVENTS_TABLE(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
-PACKAGES=('snowflake-snowpark-python')
-HANDLER = 'run'
-EXECUTE AS CALLER
-AS
-$$
-def run(snowpark_session, TABLE_NAME):
-
-    # Handle table name - if it doesn't include database/schema, use current ones
-    parts = TABLE_NAME.split('.')
-    if len(parts) == 1:  # Just table name provided
-        current_db = snowpark_session.sql("SELECT CURRENT_DATABASE() AS DB").collect()[0]['DB']
-        current_schema = snowpark_session.sql("SELECT CURRENT_SCHEMA() AS SCHEMA").collect()[0]['SCHEMA']
-        fully_qualified_table = f"{current_db}.{current_schema}.{TABLE_NAME}"
-    elif len(parts) == 2:  # Schema.table provided
-        current_db = snowpark_session.sql("SELECT CURRENT_DATABASE() AS DB").collect()[0]['DB']
-        fully_qualified_table = f"{current_db}.{TABLE_NAME}"
-    else:  # Fully qualified name provided
-        fully_qualified_table = TABLE_NAME
-
-
-    generate_sql = f'''
-
-	WITH EVENT_COLUMNS as (
-	SELECT 
-	    f.key as column_name,
-	    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
-	  FROM amplitude_events_raw t,
-	  LATERAL FLATTEN(input => t.json_data) f
-	  GROUP BY f.key
-	)
-	SELECT 
-	'CREATE OR REPLACE TABLE {fully_qualified_table} AS  \n' ||
-	'SELECT \n' ||
-	LISTAGG(DISTINCT 'json_data:"' ||column_name || '"::' || data_type || ' as "' ||column_name || '"', ',\n') ||
-	'\nFROM amplitude_events_raw;' as generated_sql
-	FROM EVENT_COLUMNS
-	WHERE (data_type NOT IN ('OBJECT','ARRAY')
-	AND data_type NOT LIKE '%,%')
-
-    '''
-
-    # Execute the SQL to create a dataframe of the result
-    df = snowpark_session.sql(generate_sql).collect()
-
-    # Get the first row
-    sql_text = df[0]['GENERATED_SQL']
-
-    # Execute the SQL to create the table directly
-    snowpark_session.sql(sql_text).collect()
-    
-    # Return a message indicating success
-    row_count = snowpark_session.sql(f"SELECT COUNT(*) AS COUNT FROM {fully_qualified_table}").collect()[0]['COUNT']
-    return f"Table {fully_qualified_table} created successfully with {row_count} rows"
-
-$$;
-
-CALL UPDATE_EVENTS_TABLE('events');
-```
-
-Can you create a procedure for the user_properties tables using the generated SQL from earlier. 
-If time create an additional argument to take any of the nested json keys, e.g. "event_properties"
-
-</details>
-
----
-
-### Snowflake Stored Procedures
-
-You can write stored procedures to extend the system with procedural code. With a procedure, you can use branching, looping, and other programmatic constructs. You can reuse a procedure multiple times by calling it from other code.
-
-A Snowflake stored procedure code is wrapped in a function taking the snowpark_session and any arguments you have given as options. The snowpark_session will give you access to execute SQL queries through Python. 
+A Snowflake Python stored procedure is wrapped in a function taking the snowpark_session and any arguments you have given as options. The snowpark_session will give you access to execute SQL queries through Python. 
 
 i.e. .collect() will execute a provided script.
 ```
@@ -928,7 +552,7 @@ Let's create this as a stored procedure
 CREATE OR REPLACE PROCEDURE TODAY()
 RETURNS STRING
 LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
+RUNTIME_VERSION = '3.11'
 PACKAGES=('snowflake-snowpark-python')
 HANDLER = 'run'
 EXECUTE AS CALLER
@@ -947,17 +571,17 @@ Then we can run our procedure with
 CALL TODAY();
 ```
 
-The objects returned from a query are returned as a dataframe object
+The objects returned from a query are returned as a list of Row objects
 
 [Row(TODAY=datetime.date(2025, 5, 21))]
 
-We can extract the exact value from the dataframe using [0] to select the first row and ['TODAY'] to select the column. Recreate the procedure selecting the value from your dataframe to verify this works.
+We can extract the exact value using [0] to select the first row and ['TODAY'] to select the column. Recreate the procedure selecting the value from your result to verify this works.
 
 ```
 CREATE OR REPLACE PROCEDURE TODAY()
 RETURNS STRING
 LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
+RUNTIME_VERSION = '3.11'
 PACKAGES=('snowflake-snowpark-python')
 HANDLER = 'run'
 EXECUTE AS CALLER
@@ -983,7 +607,7 @@ In our example add an argument to the procedure and return a string to the user
 CREATE OR REPLACE PROCEDURE TODAY(NAME STRING)
 RETURNS STRING
 LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
+RUNTIME_VERSION = '3.11'
 PACKAGES=('snowflake-snowpark-python')
 HANDLER = 'run'
 EXECUTE AS CALLER
@@ -1004,570 +628,170 @@ $$;
 CALL TODAY('Will');
 ```
 
-For our example here of having SQL write the SQL query, we can now have a Stored Procedure that will execute the generated SQL query.
+### Dynamic SQL Stored Procedure
 
-### Create Tables from the Raw Amplitude Data
+The procedure below takes a staging table and the name of the array inside it, works out every field and its data type, then writes and runs the `CREATE TABLE` statement for you. It returns the SQL it ran so you can check it.
 
-Execute these calls to a stored procedure, these will provide you with SQL code to create the Silver layer of your Amplitude Data Source. 
-
-#### To do
-
-1. Update these procedures to call your raw events table, picked the nested json section (e.g. user_properties), and table where you want to write the data. 
-2. Retreive the SQL, execute the code to confirm the tables can be built
-3. Create a stored procedure for each table with the SQL code you retrieved in step 2.
-4. Bonus: If you're feeling confidient try building your procedures from procedure in step 1. 
-
-
-Note for groups and group_properties you may not receive any data, in which case these can be skipped. 
-
-AMP_EVENTS
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    '',
-    'AMP_EVENTS'
-);
-```
 <details>
-    <summary>Generated SQL</summary>
-	
+    <summary>Dynamic SQL Stored Procedure</summary>
+
 ```
-CREATE OR REPLACE TABLE AMP_EVENTS AS
+CREATE OR REPLACE PROCEDURE GENERATE_FLATTENED_TABLE(SOURCE_TABLE_NAME VARCHAR, ARRAY_KEY VARCHAR, DESTINATION_TABLE_NAME VARCHAR)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'run'
+EXECUTE AS CALLER
+AS
+$$
+def run(snowpark_session, source_table_name, array_key, destination_table_name):
+    # One row per record in the array, e.g. raw_data:contacts
+    from_sql = f"{source_table_name} t, LATERAL FLATTEN(input => t.raw_data:{array_key}) r"
+
+    # Find every field and its data type(s) across all records.
+    # Fields that are always null become VARCHAR, fields with mixed types or nested objects are skipped.
+    get_columns_sql = f"""
+        SELECT
+            f.key AS column_name,
+            LISTAGG(DISTINCT CASE WHEN TYPEOF(f.value) = 'NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END, ', ') AS data_type
+        FROM {from_sql},
+        LATERAL FLATTEN(input => r.value) f
+        GROUP BY f.key
+        HAVING data_type NOT IN ('OBJECT', 'ARRAY') AND data_type NOT LIKE '%,%'
+    """
+    columns = snowpark_session.sql(get_columns_sql).collect()
+
+    if not columns:
+        return f"No flattenable columns found in {source_table_name} for array '{array_key}'"
+
+    select_cols = [
+        f'r.value:"{row["COLUMN_NAME"]}"::{row["DATA_TYPE"]} AS "{row["COLUMN_NAME"]}"'
+        for row in columns
+    ]
+    column_list_separator = ",\n    "
+
+    create_table_sql = f"""CREATE OR REPLACE TABLE {destination_table_name} AS
 SELECT
-            json_data:"$insert_id"::VARCHAR AS "$insert_id",
-            json_data:"client_event_time"::VARCHAR AS "client_event_time",
-            json_data:"event_type"::VARCHAR AS "event_type",
-            json_data:"device_manufacturer"::VARCHAR AS "device_manufacturer",
-            json_data:"country"::VARCHAR AS "country",
-            json_data:"server_received_time"::VARCHAR AS "server_received_time",
-            json_data:"ip_address"::VARCHAR AS "ip_address",
-            json_data:"amplitude_event_type"::VARCHAR AS "amplitude_event_type",
-            json_data:"os_version"::VARCHAR AS "os_version",
-            json_data:"version_name"::VARCHAR AS "version_name",
-            json_data:"user_id"::VARCHAR AS "user_id",
-            json_data:"$schema"::VARCHAR AS "$schema",
-            json_data:"app"::INTEGER AS "app",
-            json_data:"platform"::VARCHAR AS "platform",
-            json_data:"data_type"::VARCHAR AS "data_type",
-            json_data:"adid"::VARCHAR AS "adid",
-            json_data:"is_attribution_event"::VARCHAR AS "is_attribution_event",
-            json_data:"sample_rate"::VARCHAR AS "sample_rate",
-            json_data:"source_id"::VARCHAR AS "source_id",
-            json_data:"partner_id"::VARCHAR AS "partner_id",
-            json_data:"device_family"::VARCHAR AS "device_family",
-            json_data:"library"::VARCHAR AS "library",
-            json_data:"location_lng"::VARCHAR AS "location_lng",
-            json_data:"event_id"::INTEGER AS "event_id",
-            json_data:"paying"::VARCHAR AS "paying",
-            json_data:"os_name"::VARCHAR AS "os_name",
-            json_data:"idfa"::VARCHAR AS "idfa",
-            json_data:"start_version"::VARCHAR AS "start_version",
-            json_data:"amplitude_id"::INTEGER AS "amplitude_id",
-            json_data:"$insert_key"::VARCHAR AS "$insert_key",
-            json_data:"server_upload_time"::VARCHAR AS "server_upload_time",
-            json_data:"language"::VARCHAR AS "language",
-            json_data:"uuid"::VARCHAR AS "uuid",
-            json_data:"device_brand"::VARCHAR AS "device_brand",
-            json_data:"global_user_properties"::VARCHAR AS "global_user_properties",
-            json_data:"session_id"::INTEGER AS "session_id",
-            json_data:"city"::VARCHAR AS "city",
-            json_data:"client_upload_time"::VARCHAR AS "client_upload_time",
-            json_data:"user_creation_time"::VARCHAR AS "user_creation_time",
-            json_data:"device_type"::VARCHAR AS "device_type",
-            json_data:"amplitude_attribution_ids"::VARCHAR AS "amplitude_attribution_ids",
-            json_data:"device_id"::VARCHAR AS "device_id",
-            json_data:"region"::VARCHAR AS "region",
-            json_data:"device_model"::VARCHAR AS "device_model",
-            json_data:"event_time"::VARCHAR AS "event_time",
-            json_data:"processed_time"::VARCHAR AS "processed_time",
-            json_data:"dma"::VARCHAR AS "dma",
-            json_data:"device_carrier"::VARCHAR AS "device_carrier",
-            json_data:"location_lat"::VARCHAR AS "location_lat"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-;
-```
-	
-</details>
+    {column_list_separator.join(select_cols)}
+FROM {from_sql};"""
 
-AMP_USER_PROPERTIES
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    'user_properties',
-    'AMP_USER_PROPERTIES'
-);
-```
+    snowpark_session.sql(create_table_sql).collect()
 
-<details>
-    <summary>Generated SQL</summary>
-	
-```
-CREATE OR REPLACE TABLE AMP_USER_PROPERTIES AS
-SELECT
-            json_data:event_id::INT AS event_id,
-            json_data:session_id::INT AS session_id,
-            json_data:user_properties:"initial_fbclid"::VARCHAR AS "initial_fbclid",
-            json_data:user_properties:"referrer"::VARCHAR AS "referrer",
-            json_data:user_properties:"referring_domain"::VARCHAR AS "referring_domain",
-            json_data:user_properties:"initial_referrer"::VARCHAR AS "initial_referrer",
-            json_data:user_properties:"initial_utm_medium"::VARCHAR AS "initial_utm_medium",
-            json_data:user_properties:"initial_utm_campaign"::VARCHAR AS "initial_utm_campaign",
-            json_data:user_properties:"initial_utm_content"::VARCHAR AS "initial_utm_content",
-            json_data:user_properties:"initial_msclkid"::VARCHAR AS "initial_msclkid",
-            json_data:user_properties:"initial_referring_domain"::VARCHAR AS "initial_referring_domain",
-            json_data:user_properties:"initial_gclid"::VARCHAR AS "initial_gclid",
-            json_data:user_properties:"initial_ttclid"::VARCHAR AS "initial_ttclid",
-            json_data:user_properties:"initial_dclid"::VARCHAR AS "initial_dclid",
-            json_data:user_properties:"utm_medium"::VARCHAR AS "utm_medium",
-            json_data:user_properties:"initial_twclid"::VARCHAR AS "initial_twclid",
-            json_data:user_properties:"utm_campaign"::VARCHAR AS "utm_campaign",
-            json_data:user_properties:"fbclid"::VARCHAR AS "fbclid",
-            json_data:user_properties:"initial_ko_click_id"::VARCHAR AS "initial_ko_click_id",
-            json_data:user_properties:"initial_li_fat_id"::VARCHAR AS "initial_li_fat_id",
-            json_data:user_properties:"initial_utm_term"::VARCHAR AS "initial_utm_term",
-            json_data:user_properties:"initial_gbraid"::VARCHAR AS "initial_gbraid",
-            json_data:user_properties:"initial_utm_id"::VARCHAR AS "initial_utm_id",
-            json_data:user_properties:"utm_source"::VARCHAR AS "utm_source",
-            json_data:user_properties:"initial_rtd_cid"::VARCHAR AS "initial_rtd_cid",
-            json_data:user_properties:"initial_wbraid"::VARCHAR AS "initial_wbraid",
-            json_data:user_properties:"initial_utm_source"::VARCHAR AS "initial_utm_source"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-WHERE json_data:user_properties IS NOT NULL AND json_data:user_properties <> PARSE_JSON('{}');
-```
-	
-</details>
-
-
-AMP_EVENT_PROPERTIES
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    'event_properties',
-    'AMP_EVENT_PROPERTIES'
-);
-```
-<details>
-    <summary>Generated SQL</summary>
-	
-```
-CREATE OR REPLACE TABLE AMP_EVENT_PROPERTIES AS
-SELECT
-            json_data:event_id::INT AS event_id,
-            json_data:session_id::INT AS session_id,
-            json_data:event_properties:"referring_domain"::VARCHAR AS "referring_domain",
-            json_data:event_properties:"referrer"::VARCHAR AS "referrer",
-            json_data:event_properties:"[Amplitude] Element Selector"::VARCHAR AS "[Amplitude] Element Selector",
-            json_data:event_properties:"[Amplitude] Element Tag"::VARCHAR AS "[Amplitude] Element Tag",
-            json_data:event_properties:"code"::VARCHAR AS "code",
-            json_data:event_properties:"[Amplitude] Element Position Top"::INTEGER AS "[Amplitude] Element Position Top",
-            json_data:event_properties:"[Amplitude] Element Aria Label"::VARCHAR AS "[Amplitude] Element Aria Label",
-            json_data:event_properties:"[Amplitude] Form Destination"::VARCHAR AS "[Amplitude] Form Destination",
-            json_data:event_properties:"action"::VARCHAR AS "action",
-            json_data:event_properties:"[Amplitude] Page Title"::VARCHAR AS "[Amplitude] Page Title",
-            json_data:event_properties:"[Amplitude] Element ID"::VARCHAR AS "[Amplitude] Element ID",
-            json_data:event_properties:"[Amplitude] Element Parent Label"::VARCHAR AS "[Amplitude] Element Parent Label",
-            json_data:event_properties:"[Amplitude] Page URL"::VARCHAR AS "[Amplitude] Page URL",
-            json_data:event_properties:"video_progress"::DECIMAL AS "video_progress",
-            json_data:event_properties:"video_url"::VARCHAR AS "video_url",
-            json_data:event_properties:"[Amplitude] Page Counter"::INTEGER AS "[Amplitude] Page Counter",
-            json_data:event_properties:"video"::VARCHAR AS "video",
-            json_data:event_properties:"[Amplitude] Session Replay ID"::VARCHAR AS "[Amplitude] Session Replay ID",
-            json_data:event_properties:"utm_medium"::VARCHAR AS "utm_medium",
-            json_data:event_properties:"utm_campaign"::VARCHAR AS "utm_campaign",
-            json_data:event_properties:"fbclid"::VARCHAR AS "fbclid",
-            json_data:event_properties:"playlist"::VARCHAR AS "playlist",
-            json_data:event_properties:"[Amplitude] Page Path"::VARCHAR AS "[Amplitude] Page Path",
-            json_data:event_properties:"video_watchTime"::DECIMAL AS "video_watchTime",
-            json_data:event_properties:"[Amplitude] Element Position Left"::INTEGER AS "[Amplitude] Element Position Left",
-            json_data:event_properties:"[Amplitude] Element Href"::VARCHAR AS "[Amplitude] Element Href",
-            json_data:event_properties:"[Amplitude] Page Domain"::VARCHAR AS "[Amplitude] Page Domain",
-            json_data:event_properties:"[Amplitude] Element Text"::VARCHAR AS "[Amplitude] Element Text",
-            json_data:event_properties:"utm_source"::VARCHAR AS "utm_source",
-            json_data:event_properties:"[Amplitude] Viewport Width"::INTEGER AS "[Amplitude] Viewport Width",
-            json_data:event_properties:"[Amplitude] Element Class"::VARCHAR AS "[Amplitude] Element Class",
-            json_data:event_properties:"[Amplitude] Page Location"::VARCHAR AS "[Amplitude] Page Location",
-            json_data:event_properties:"[Amplitude] Viewport Height"::INTEGER AS "[Amplitude] Viewport Height"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-WHERE json_data:event_properties IS NOT NULL AND json_data:event_properties <> PARSE_JSON('{}');
-```
-	
-</details>
-
-
-AMP_GROUPS
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    'groups',
-    'AMP_GROUPS'
-);
-```
-<details>
-    <summary>Generated SQL</summary>
-	
-```
-No flattenable columns found for the given JSON path, or the path does not exist/contains only objects/arrays.
-```
-</details>
-
-AMP_GROUP_PROPERTIES
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    'group_properties',
-    'AMP_GROUP_PROPERTIES'
-);
-```
-<details>
-    <summary>Generated SQL</summary>
-	
-```
-No flattenable columns found for the given JSON path, or the path does not exist/contains only objects/arrays.
-```
-</details>
-
-AMP_DATA
-```
-CALL TIL_DATA_ENGINEERING.WJSUTTON_STAGING.GENERATE_FLATTENED_JSON(
-    'TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON',
-    'data',
-    'AMP_DATA'
-);
-```
-<details>
-    <summary>Generated SQL</summary>
-
-```
-CREATE OR REPLACE TABLE AMP_DATA AS
-SELECT
-            json_data:event_id::INT AS event_id,
-            json_data:session_id::INT AS session_id,
-            json_data:data:"path"::VARCHAR AS "path",
-            json_data:data:"user_properties_updated"::BOOLEAN AS "user_properties_updated"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-WHERE json_data:data IS NOT NULL AND json_data:data <> PARSE_JSON('{}');
-```
-
-</details>
-
-<details>
-    <summary>Example Stored Procedure for AMP_DATA Table Creation as SQL</summary>
-
-Note: the query is wrapped in a single quote <b>'</b> so you will need to:
-- end the string with a single quote before the semi-colon (;)
-- double single quote any quotes as part of the query
-- e.g. PARSE_JSON('{}') needs to be PARSE_JSON(''{}'') here 
-
-```
-CREATE OR REPLACE PROCEDURE CREATE_AMP_DATA(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE SQL
-EXECUTE AS CALLER
-AS
-$$
-BEGIN
-    LET sql_query STRING := 'CREATE OR REPLACE TABLE ' || TABLE_NAME || ' AS
-    SELECT
-        json_data:event_id::INT AS event_id,
-        json_data:session_id::INT AS session_id,
-        json_data:data:"path"::VARCHAR AS "path",
-        json_data:data:"user_properties_updated"::BOOLEAN AS "user_properties_updated"
-    FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-    WHERE json_data:data IS NOT NULL AND json_data:data <> PARSE_JSON(''{}'')';
-    
-    EXECUTE IMMEDIATE sql_query;
-    
-    RETURN 'Table ' || TABLE_NAME || ' created successfully';
-END;
-$$;
-```
-
-</details>
-
-### Automating this for new data arrival
-
-If you haven't please configure a SNOWPIPE to move data from your stage to the raw table as described at the end of last week's session: [Week 2 Amplitude: auto-ingest-data-with-snowpipe](https://github.com/TheInformationLab/data_engineering_school_course/blob/des3-updates/course_docs/week_2_amplitude_load.md#auto-ingest-data-with-snowpipe) 
-
-This will mean any new data flows into your raw table, now we need to move the data into the silver layer. To do this we will need to configure a `STREAM` and `TASKS`.
-
-#### Step 1: Create a Stream on Your Source Table
-
-A stream tracks real-time data changes (inserts/updates/deletes). Create one for your source table:
-
-```
-CREATE STREAM amplitude_source_stream ON TABLE AMPLITUDE_EVENTS_RAW_PYTHON;
-```
-
-#### Step 2: Consolidate Stored Procedures
-Since tasks execute only one SQL statement or stored procedure we will need to create a Stored Procedure of the previous procedures. 
-
-```
-CREATE OR REPLACE PROCEDURE run_amp_silver_layer()  
-RETURNS STRING  
-LANGUAGE SQL  
-AS  
-$$  
-  BEGIN  
-    CALL CREATE_AMP_EVENTS(AMP_EVENTS);
-    CALL CREATE_AMP_USER_PROPERTIES(AMP_USER_PROPERTIES);
-    CALL CREATE_AMP_EVENT_PROPERTIES(AMP_EVENT_PROPERTIES);  
-    CALL CREATE_AMP_DATA(AMP_DATA);  
-    RETURN 'Silver layer rebuilt';  
-  END;  
-$$;  
-
-```
-#### Step 3: Create a Conditional Task
-
-Schedule a task that runs only when the stream contains new data:
-```
-CREATE TASK amp_silver_layer_trigger  
-WAREHOUSE = DATASCHOOL_WH
-SCHEDULE = '5 MINUTE' 
-WHEN SYSTEM$STREAM_HAS_DATA('amplitude_source_stream')  
-AS  
-  CALL run_amp_silver_layer();
-```
-
-#### Step 4: Activate the Task
-
-```
-ALTER TASK amp_silver_layer_trigger RESUME;
-```
-
-#### Step 5: Monitor the Task
-
-Upload some new data your to S3 Bucket, this shoudl trigger SNOWPIPE to move the data to your raw tables then this task should start shortly afterwards. 
-```
-SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY());  
-```
-
-</details>
-
-<details>
-    <summary>Solution</summary>
-	
-```
-CREATE OR REPLACE PROCEDURE CREATE_AMP_EVENTS(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE SQL
-EXECUTE AS CALLER
-AS
-$$
-BEGIN
-    LET sql_query STRING := 'CREATE OR REPLACE TABLE ' || TABLE_NAME || ' AS
-    SELECT
-            json_data:"$insert_id"::VARCHAR AS "$insert_id",
-            json_data:"client_event_time"::VARCHAR AS "client_event_time",
-            json_data:"event_type"::VARCHAR AS "event_type",
-            json_data:"device_manufacturer"::VARCHAR AS "device_manufacturer",
-            json_data:"country"::VARCHAR AS "country",
-            json_data:"server_received_time"::VARCHAR AS "server_received_time",
-            json_data:"ip_address"::VARCHAR AS "ip_address",
-            json_data:"amplitude_event_type"::VARCHAR AS "amplitude_event_type",
-            json_data:"os_version"::VARCHAR AS "os_version",
-            json_data:"version_name"::VARCHAR AS "version_name",
-            json_data:"user_id"::VARCHAR AS "user_id",
-            json_data:"$schema"::VARCHAR AS "$schema",
-            json_data:"app"::INTEGER AS "app",
-            json_data:"platform"::VARCHAR AS "platform",
-            json_data:"data_type"::VARCHAR AS "data_type",
-            json_data:"adid"::VARCHAR AS "adid",
-            json_data:"is_attribution_event"::VARCHAR AS "is_attribution_event",
-            json_data:"sample_rate"::VARCHAR AS "sample_rate",
-            json_data:"source_id"::VARCHAR AS "source_id",
-            json_data:"partner_id"::VARCHAR AS "partner_id",
-            json_data:"device_family"::VARCHAR AS "device_family",
-            json_data:"library"::VARCHAR AS "library",
-            json_data:"location_lng"::VARCHAR AS "location_lng",
-            json_data:"event_id"::INTEGER AS "event_id",
-            json_data:"paying"::VARCHAR AS "paying",
-            json_data:"os_name"::VARCHAR AS "os_name",
-            json_data:"idfa"::VARCHAR AS "idfa",
-            json_data:"start_version"::VARCHAR AS "start_version",
-            json_data:"amplitude_id"::INTEGER AS "amplitude_id",
-            json_data:"$insert_key"::VARCHAR AS "$insert_key",
-            json_data:"server_upload_time"::VARCHAR AS "server_upload_time",
-            json_data:"language"::VARCHAR AS "language",
-            json_data:"uuid"::VARCHAR AS "uuid",
-            json_data:"device_brand"::VARCHAR AS "device_brand",
-            json_data:"global_user_properties"::VARCHAR AS "global_user_properties",
-            json_data:"session_id"::INTEGER AS "session_id",
-            json_data:"city"::VARCHAR AS "city",
-            json_data:"client_upload_time"::VARCHAR AS "client_upload_time",
-            json_data:"user_creation_time"::VARCHAR AS "user_creation_time",
-            json_data:"device_type"::VARCHAR AS "device_type",
-            json_data:"amplitude_attribution_ids"::VARCHAR AS "amplitude_attribution_ids",
-            json_data:"device_id"::VARCHAR AS "device_id",
-            json_data:"region"::VARCHAR AS "region",
-            json_data:"device_model"::VARCHAR AS "device_model",
-            json_data:"event_time"::VARCHAR AS "event_time",
-            json_data:"processed_time"::VARCHAR AS "processed_time",
-            json_data:"dma"::VARCHAR AS "dma",
-            json_data:"device_carrier"::VARCHAR AS "device_carrier",
-            json_data:"location_lat"::VARCHAR AS "location_lat"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-';
-    
-    EXECUTE IMMEDIATE sql_query;
-    
-    RETURN 'Table ' || TABLE_NAME || ' created successfully';
-END;
+    # Return the executed SQL for verification
+    return create_table_sql
 $$;
 
-CREATE OR REPLACE PROCEDURE CREATE_AMP_USER_PROPERTIES(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE SQL
-EXECUTE AS CALLER
-AS
-$$
-BEGIN
-    LET sql_query STRING := 'CREATE OR REPLACE TABLE ' || TABLE_NAME || ' AS
-    SELECT
-            json_data:event_id::INT AS event_id,
-            json_data:session_id::INT AS session_id,
-            json_data:user_properties:"initial_fbclid"::VARCHAR AS "initial_fbclid",
-            json_data:user_properties:"referrer"::VARCHAR AS "referrer",
-            json_data:user_properties:"referring_domain"::VARCHAR AS "referring_domain",
-            json_data:user_properties:"initial_referrer"::VARCHAR AS "initial_referrer",
-            json_data:user_properties:"initial_utm_medium"::VARCHAR AS "initial_utm_medium",
-            json_data:user_properties:"initial_utm_campaign"::VARCHAR AS "initial_utm_campaign",
-            json_data:user_properties:"initial_utm_content"::VARCHAR AS "initial_utm_content",
-            json_data:user_properties:"initial_msclkid"::VARCHAR AS "initial_msclkid",
-            json_data:user_properties:"initial_referring_domain"::VARCHAR AS "initial_referring_domain",
-            json_data:user_properties:"initial_gclid"::VARCHAR AS "initial_gclid",
-            json_data:user_properties:"initial_ttclid"::VARCHAR AS "initial_ttclid",
-            json_data:user_properties:"initial_dclid"::VARCHAR AS "initial_dclid",
-            json_data:user_properties:"utm_medium"::VARCHAR AS "utm_medium",
-            json_data:user_properties:"initial_twclid"::VARCHAR AS "initial_twclid",
-            json_data:user_properties:"utm_campaign"::VARCHAR AS "utm_campaign",
-            json_data:user_properties:"fbclid"::VARCHAR AS "fbclid",
-            json_data:user_properties:"initial_ko_click_id"::VARCHAR AS "initial_ko_click_id",
-            json_data:user_properties:"initial_li_fat_id"::VARCHAR AS "initial_li_fat_id",
-            json_data:user_properties:"initial_utm_term"::VARCHAR AS "initial_utm_term",
-            json_data:user_properties:"initial_gbraid"::VARCHAR AS "initial_gbraid",
-            json_data:user_properties:"initial_utm_id"::VARCHAR AS "initial_utm_id",
-            json_data:user_properties:"utm_source"::VARCHAR AS "utm_source",
-            json_data:user_properties:"initial_rtd_cid"::VARCHAR AS "initial_rtd_cid",
-            json_data:user_properties:"initial_wbraid"::VARCHAR AS "initial_wbraid",
-            json_data:user_properties:"initial_utm_source"::VARCHAR AS "initial_utm_source"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-WHERE json_data:user_properties IS NOT NULL AND json_data:user_properties <> PARSE_JSON(''{}'')';
-    
-    EXECUTE IMMEDIATE sql_query;
-    
-    RETURN 'Table ' || TABLE_NAME || ' created successfully';
-END;
-$$;
-
-CREATE OR REPLACE PROCEDURE CREATE_AMP_EVENT_PROPERTIES(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE SQL
-EXECUTE AS CALLER
-AS
-$$
-BEGIN
-    LET sql_query STRING := 'CREATE OR REPLACE TABLE ' || TABLE_NAME || ' AS
-    SELECT
-            json_data:event_id::INT AS event_id,
-            json_data:session_id::INT AS session_id,
-            json_data:event_properties:"referring_domain"::VARCHAR AS "referring_domain",
-            json_data:event_properties:"referrer"::VARCHAR AS "referrer",
-            json_data:event_properties:"[Amplitude] Element Selector"::VARCHAR AS "[Amplitude] Element Selector",
-            json_data:event_properties:"[Amplitude] Element Tag"::VARCHAR AS "[Amplitude] Element Tag",
-            json_data:event_properties:"code"::VARCHAR AS "code",
-            json_data:event_properties:"[Amplitude] Element Position Top"::INTEGER AS "[Amplitude] Element Position Top",
-            json_data:event_properties:"[Amplitude] Element Aria Label"::VARCHAR AS "[Amplitude] Element Aria Label",
-            json_data:event_properties:"[Amplitude] Form Destination"::VARCHAR AS "[Amplitude] Form Destination",
-            json_data:event_properties:"action"::VARCHAR AS "action",
-            json_data:event_properties:"[Amplitude] Page Title"::VARCHAR AS "[Amplitude] Page Title",
-            json_data:event_properties:"[Amplitude] Element ID"::VARCHAR AS "[Amplitude] Element ID",
-            json_data:event_properties:"[Amplitude] Element Parent Label"::VARCHAR AS "[Amplitude] Element Parent Label",
-            json_data:event_properties:"[Amplitude] Page URL"::VARCHAR AS "[Amplitude] Page URL",
-            json_data:event_properties:"video_progress"::DECIMAL AS "video_progress",
-            json_data:event_properties:"video_url"::VARCHAR AS "video_url",
-            json_data:event_properties:"[Amplitude] Page Counter"::INTEGER AS "[Amplitude] Page Counter",
-            json_data:event_properties:"video"::VARCHAR AS "video",
-            json_data:event_properties:"[Amplitude] Session Replay ID"::VARCHAR AS "[Amplitude] Session Replay ID",
-            json_data:event_properties:"utm_medium"::VARCHAR AS "utm_medium",
-            json_data:event_properties:"utm_campaign"::VARCHAR AS "utm_campaign",
-            json_data:event_properties:"fbclid"::VARCHAR AS "fbclid",
-            json_data:event_properties:"playlist"::VARCHAR AS "playlist",
-            json_data:event_properties:"[Amplitude] Page Path"::VARCHAR AS "[Amplitude] Page Path",
-            json_data:event_properties:"video_watchTime"::DECIMAL AS "video_watchTime",
-            json_data:event_properties:"[Amplitude] Element Position Left"::INTEGER AS "[Amplitude] Element Position Left",
-            json_data:event_properties:"[Amplitude] Element Href"::VARCHAR AS "[Amplitude] Element Href",
-            json_data:event_properties:"[Amplitude] Page Domain"::VARCHAR AS "[Amplitude] Page Domain",
-            json_data:event_properties:"[Amplitude] Element Text"::VARCHAR AS "[Amplitude] Element Text",
-            json_data:event_properties:"utm_source"::VARCHAR AS "utm_source",
-            json_data:event_properties:"[Amplitude] Viewport Width"::INTEGER AS "[Amplitude] Viewport Width",
-            json_data:event_properties:"[Amplitude] Element Class"::VARCHAR AS "[Amplitude] Element Class",
-            json_data:event_properties:"[Amplitude] Page Location"::VARCHAR AS "[Amplitude] Page Location",
-            json_data:event_properties:"[Amplitude] Viewport Height"::INTEGER AS "[Amplitude] Viewport Height"
-FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-WHERE json_data:event_properties IS NOT NULL AND json_data:event_properties <> PARSE_JSON(''{}'')';
-    
-    EXECUTE IMMEDIATE sql_query;
-    
-    RETURN 'Table ' || TABLE_NAME || ' created successfully';
-END;
-$$;
-
-
-CREATE OR REPLACE PROCEDURE CREATE_AMP_DATA(TABLE_NAME STRING)
-RETURNS STRING
-LANGUAGE SQL
-EXECUTE AS CALLER
-AS
-$$
-BEGIN
-    LET sql_query STRING := 'CREATE OR REPLACE TABLE ' || TABLE_NAME || ' AS
-    SELECT
-        json_data:event_id::INT AS event_id,
-        json_data:session_id::INT AS session_id,
-        json_data:data:"path"::VARCHAR AS "path",
-        json_data:data:"user_properties_updated"::BOOLEAN AS "user_properties_updated"
-    FROM TIL_DATA_ENGINEERING.WJSUTTON_STAGING.AMPLITUDE_EVENTS_RAW_PYTHON
-    WHERE json_data:data IS NOT NULL AND json_data:data <> PARSE_JSON(''{}'')';
-    
-    EXECUTE IMMEDIATE sql_query;
-    
-    RETURN 'Table ' || TABLE_NAME || ' created successfully';
-END;
-$$;
-
-CREATE OR REPLACE STREAM amplitude_source_stream ON TABLE AMPLITUDE_EVENTS_RAW_PYTHON;
-
-CREATE OR REPLACE PROCEDURE run_amp_silver_layer()  
-RETURNS STRING  
-LANGUAGE SQL  
-AS  
-$$  
-  BEGIN  
-    CALL CREATE_AMP_EVENTS(AMP_EVENTS);
-    CALL CREATE_AMP_USER_PROPERTIES(AMP_USER_PROPERTIES);
-    CALL CREATE_AMP_EVENT_PROPERTIES(AMP_EVENT_PROPERTIES);  
-    CALL CREATE_AMP_DATA(AMP_DATA);  
-    RETURN 'Silver layer rebuilt';  
-  END;  
-$$;  
-
-CREATE TASK amp_silver_layer_trigger  
-WAREHOUSE = DATASCHOOL_WH
-SCHEDULE = '5 MINUTE' 
-WHEN SYSTEM$STREAM_HAS_DATA('amplitude_source_stream')  
-AS  
-  CALL run_amp_silver_layer();
-
-ALTER TASK amp_silver_layer_trigger RESUME;
-
-SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
-WHERE name = 'AMP_SILVER_LAYER_TRIGGER';
-
--- Import new data into the stage and rerun the step above
-        
+CALL GENERATE_FLATTENED_TABLE('stg_contacts', 'contacts', 'GEN_CONTACTS');
 ```
 </details>
+
+---
+<details>
+    <summary>Workings of how the Dynamic SQL Stored Procedure is built, you don't need to understand this it's just if you're interested</summary>
+
+Using Snowflake, we can find all the keys used across the records in an array. The first FLATTEN turns the array into one row per record, the second turns each record into one row per field.
+
+```
+SELECT DISTINCT 
+    f.key AS column_name
+FROM stg_contacts t,
+  LATERAL FLATTEN(input => t.raw_data:contacts) r,
+  LATERAL FLATTEN(input => r.value) f
+ORDER BY f.key;
+```
+
+We can then have SQL dynamically write these columns as a SQL script for us to execute.
+
+```
+WITH CTE as (
+    SELECT DISTINCT 
+        f.key AS column_name
+    FROM stg_contacts t,
+      LATERAL FLATTEN(input => t.raw_data:contacts) r,
+      LATERAL FLATTEN(input => r.value) f
+)
+
+SELECT 
+  'SELECT r.value:' || LISTAGG(DISTINCT '"' || column_name || '"', ',\nr.value:') || 
+  '\nFROM stg_contacts t, LATERAL FLATTEN(input => t.raw_data:contacts) r;' AS generated_sql
+FROM CTE;
+```
+
+Run the SQL generated by this query. Every column comes out as a VARIANT, so next we need data types.
+
+**How do we find each field's data type?**
+
+The `TYPEOF()` function will return the data type of each value, including `OBJECT` and `ARRAY` for anything nested. 
+
+```
+-- Determine data types for each field
+SELECT DISTINCT 
+    f.key AS column_name,
+    TYPEOF(f.value) as data_type
+FROM stg_contacts t,
+  LATERAL FLATTEN(input => t.raw_data:contacts) r,
+  LATERAL FLATTEN(input => r.value) f
+ORDER BY f.key;
+```
+We can ensure we have consistent data types in our tables with `LISTAGG(DISTINCT TYPEOF(f.VALUE),', ')` to comma separate any multi data types columns.
+
+To remove any nested objects or arrays and any mixed-type fields, we filter out `OBJECT`, `ARRAY` and anything LIKE `%,%`.
+
+As we are constructing a SELECT statement, we will want to include the data types. `NULL_VALUE` is not a valid data type so we will convert these to `VARCHAR`.
+
+This query will return 2 columns with the column names and the data types.
+
+```
+SELECT 
+    f.key as column_name,
+    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
+FROM stg_contacts t,
+  LATERAL FLATTEN(input => t.raw_data:contacts) r,
+  LATERAL FLATTEN(input => r.value) f
+GROUP BY f.key
+HAVING (data_type NOT IN ('OBJECT','ARRAY')
+AND data_type NOT LIKE '%,%');
+```
+
+Now we will need to construct a CREATE TABLE statement SELECTing from our raw table, combining all of these columns into one cell with LISTAGG()
+
+```
+WITH CONTACT_COLUMNS as (
+SELECT 
+    f.key as column_name,
+    LISTAGG(DISTINCT (CASE WHEN TYPEOF(f.value)='NULL_VALUE' THEN 'VARCHAR' ELSE TYPEOF(f.value) END),', ') as data_type
+FROM stg_contacts t,
+  LATERAL FLATTEN(input => t.raw_data:contacts) r,
+  LATERAL FLATTEN(input => r.value) f
+GROUP BY f.key
+)
+SELECT 
+'CREATE OR REPLACE TABLE gen_contacts AS  \n' ||
+'SELECT \n' ||
+LISTAGG(DISTINCT 'r.value:"' || column_name || '"::' || data_type || ' as "' || column_name || '"', ',\n') ||
+'\nFROM stg_contacts t, LATERAL FLATTEN(input => t.raw_data:contacts) r;' as generated_sql
+FROM CONTACT_COLUMNS
+WHERE (data_type NOT IN ('OBJECT','ARRAY')
+AND data_type NOT LIKE '%,%');
+```
+
+The same query works for any of our endpoints by changing:
+- the staging table, e.g. `stg_invoices`
+- the array name in `LATERAL FLATTEN(input => t.raw_data:invoices)`
+- the table name in `CREATE OR REPLACE TABLE gen_invoices AS`
+
+The stored procedure above wraps this query, swapping those three values for its arguments.
+
+</details>
+
+---
+
+### To do
+
+1. Call `GENERATE_FLATTENED_TABLE` for each of your five staging tables and check the SQL it returns.
+2. The generated tables are a straight copy of the JSON: URLs are still URLs, numbers stored as text are still text and snapshots are still duplicated. Decide whether you'd fix these by extending the procedure or by building on top of the generated tables.
+3. Bonus: automate your generated tables with a stream and task. Remember the procedure the task calls must read from the stream in a DML statement, otherwise the stream never empties and the task will run every time it's scheduled.
 
 </details>
 
@@ -1589,3 +813,9 @@ Snowpipe
 Snowflake Stored Procedures: https://docs.snowflake.com/en/developer-guide/stored-procedure/stored-procedures-overview
 
 Tasks in Snowflake: https://docs.snowflake.com/en/user-guide/tasks-intro
+
+Streams in Snowflake: https://docs.snowflake.com/en/user-guide/streams-intro
+
+FLATTEN: https://docs.snowflake.com/en/sql-reference/functions/flatten
+
+Dynamic Tables: https://docs.snowflake.com/en/user-guide/dynamic-tables-about

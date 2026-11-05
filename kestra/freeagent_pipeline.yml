@@ -1,0 +1,31 @@
+id: freeagent_pipeline
+namespace: til.des
+
+variables:
+  repo_url: "https://github.com/DataJamesC/Free_Agent_Project.git"
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:
+      - id: clone
+        type: io.kestra.plugin.git.Clone
+        url: "{{ vars.repo_url }}"
+        branch: dev
+        username: "{{ kv('GITHUB_USERNAME') }}"
+        password: "{{ kv('GITHUB_TOKEN') }}"
+
+      - id: python
+        type: io.kestra.plugin.scripts.python.Commands
+        beforeCommands:
+          - pip install -r requirements.txt
+        env:
+          FREEAGENT_CLIENT_ID: "{{ kv('FREEAGENT_CLIENT_ID') }}"
+          FREEAGENT_CLIENT_SECRET: "{{ kv('FREEAGENT_CLIENT_SECRET') }}"
+          FREEAGENT_REFRESH_TOKEN: "{{ kv('FREEAGENT_REFRESH_TOKEN') }}"
+          AWS_ACCESS_KEY_ID: "{{ kv('AWS_ACCESS_KEY_ID') }}"
+          AWS_SECRET_ACCESS_KEY: "{{ kv('AWS_SECRET_ACCESS_KEY') }}"
+          AWS_REGION: "{{ kv('AWS_REGION') }}"
+          AWS_BUCKET_NAME: "{{ kv('AWS_BUCKET_NAME') }}"
+        commands:
+          - python Extract/extract_all_incremental.py
